@@ -1,0 +1,2 @@
+# requirements_minimal.txt
+faster-whisper==0.10.0

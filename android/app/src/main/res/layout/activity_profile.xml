@@ -1,0 +1,268 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.swiperefreshlayout.widget.SwipeRefreshLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/profile_swipe_refresh"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fitsSystemWindows="true">
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@drawable/earpieceai_gradient_background"
+        android:fillViewport="true">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="20dp"
+            android:gravity="center_horizontal">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Profile"
+                android:textSize="24sp"
+                android:textStyle="bold"
+                android:textColor="@color/earpieceai_on_background"
+                android:layout_marginBottom="12dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/profile_back_button"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Back"
+                style="@style/Widget.EarpieceAi.Button.Secondary"
+                android:layout_marginBottom="20dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp"
+                android:background="@drawable/earpieceai_card_background"
+                android:layout_marginBottom="12dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Account"
+                    android:textStyle="bold"
+                    android:textSize="16sp"
+                    android:textColor="@color/earpieceai_on_surface"
+                    android:layout_marginBottom="8dp" />
+
+                <TextView
+                    android:id="@+id/profile_email"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Email: —"
+                    android:textColor="@color/earpieceai_on_surface"
+                    android:textSize="14sp"
+                    android:layout_marginBottom="6dp" />
+
+                <TextView
+                    android:id="@+id/profile_user_id"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="User ID: —"
+                    android:textColor="@color/earpieceai_on_surface"
+                    android:textSize="14sp"
+                    android:layout_marginBottom="6dp" />
+
+                <TextView
+                    android:id="@+id/profile_subscription"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Subscription: —"
+                    android:textColor="@color/earpieceai_on_surface"
+                    android:textSize="14sp"
+                    android:layout_marginBottom="6dp" />
+
+                <TextView
+                    android:id="@+id/profile_created_at"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Created: —"
+                    android:textColor="@color/earpieceai_on_surface"
+                    android:textSize="14sp"
+                    android:layout_marginBottom="6dp" />
+
+                <TextView
+                    android:id="@+id/profile_last_token"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Last token request: —"
+                    android:textColor="@color/earpieceai_on_surface"
+                    android:textSize="14sp"
+                    android:layout_marginBottom="6dp" />
+
+                <TextView
+                    android:id="@+id/profile_duration_remaining"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Duration remaining (sec): —"
+                    android:textColor="@color/earpieceai_on_surface"
+                    android:textSize="14sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp"
+                android:background="@drawable/earpieceai_card_background"
+                android:layout_marginBottom="12dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Today"
+                    android:textStyle="bold"
+                    android:textSize="16sp"
+                    android:textColor="@color/earpieceai_on_surface"
+                    android:layout_marginBottom="8dp" />
+
+                <TextView
+                    android:id="@+id/profile_usage_daily_tokens"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Tokens: —"
+                    android:textColor="@color/earpieceai_on_surface"
+                    android:textSize="14sp"
+                    android:layout_marginBottom="6dp" />
+
+                <TextView
+                    android:id="@+id/profile_usage_daily_duration"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Duration (sec): —"
+                    android:textColor="@color/earpieceai_on_surface"
+                    android:textSize="14sp"
+                    android:layout_marginBottom="6dp" />
+
+                <TextView
+                    android:id="@+id/profile_usage_daily_words"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Words: —"
+                    android:textColor="@color/earpieceai_on_surface"
+                    android:textSize="14sp"
+                    android:layout_marginBottom="6dp" />
+
+                <TextView
+                    android:id="@+id/profile_usage_daily_transcriptions"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Sessions: —"
+                    android:textColor="@color/earpieceai_on_surface"
+                    android:textSize="14sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp"
+                android:background="@drawable/earpieceai_card_background"
+                android:layout_marginBottom="12dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="This Month"
+                    android:textStyle="bold"
+                    android:textSize="16sp"
+                    android:textColor="@color/earpieceai_on_surface"
+                    android:layout_marginBottom="8dp" />
+
+                <TextView
+                    android:id="@+id/profile_usage_monthly_tokens"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Tokens: —"
+                    android:textColor="@color/earpieceai_on_surface"
+                    android:textSize="14sp"
+                    android:layout_marginBottom="6dp" />
+
+                <TextView
+                    android:id="@+id/profile_usage_monthly_duration"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Duration (sec): —"
+                    android:textColor="@color/earpieceai_on_surface"
+                    android:textSize="14sp"
+                    android:layout_marginBottom="6dp" />
+
+                <TextView
+                    android:id="@+id/profile_usage_monthly_words"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Words: —"
+                    android:textColor="@color/earpieceai_on_surface"
+                    android:textSize="14sp"
+                    android:layout_marginBottom="6dp" />
+
+                <TextView
+                    android:id="@+id/profile_usage_monthly_transcriptions"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Sessions: —"
+                    android:textColor="@color/earpieceai_on_surface"
+                    android:textSize="14sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp"
+                android:background="@drawable/earpieceai_card_background">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Lifetime"
+                    android:textStyle="bold"
+                    android:textSize="16sp"
+                    android:textColor="@color/earpieceai_on_surface"
+                    android:layout_marginBottom="8dp" />
+
+                <TextView
+                    android:id="@+id/profile_usage_lifetime_tokens"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Tokens: —"
+                    android:textColor="@color/earpieceai_on_surface"
+                    android:textSize="14sp"
+                    android:layout_marginBottom="6dp" />
+
+                <TextView
+                    android:id="@+id/profile_usage_lifetime_duration"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Duration (sec): —"
+                    android:textColor="@color/earpieceai_on_surface"
+                    android:textSize="14sp"
+                    android:layout_marginBottom="6dp" />
+
+                <TextView
+                    android:id="@+id/profile_usage_lifetime_words"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Words: —"
+                    android:textColor="@color/earpieceai_on_surface"
+                    android:textSize="14sp"
+                    android:layout_marginBottom="6dp" />
+
+                <TextView
+                    android:id="@+id/profile_usage_lifetime_transcriptions"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Sessions: —"
+                    android:textColor="@color/earpieceai_on_surface"
+                    android:textSize="14sp" />
+            </LinearLayout>
+        </LinearLayout>
+    </ScrollView>
+</androidx.swiperefreshlayout.widget.SwipeRefreshLayout>

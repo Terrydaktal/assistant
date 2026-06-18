@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@drawable/earpieceai_gradient_background"
+    android:padding="24dp"
+    android:fitsSystemWindows="true"
+    android:gravity="center_horizontal">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Earpiece AI Settings"
+        android:textSize="24sp"
+        android:textStyle="bold"
+        android:textColor="@color/earpieceai_on_background"
+        android:layout_marginBottom="32dp" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Email:"
+        android:textColor="@color/earpieceai_on_surface"
+        android:layout_marginBottom="8dp" />
+
+    <EditText
+        android:id="@+id/email_edittext"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@drawable/earpieceai_input_background"
+        android:hint="Enter your email"
+        android:inputType="textEmailAddress"
+        android:textColor="@color/earpieceai_on_surface"
+        android:textColorHint="@color/earpieceai_hint"
+        android:layout_marginBottom="16dp" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Password:"
+        android:textColor="@color/earpieceai_on_surface"
+        android:layout_marginBottom="8dp" />
+
+    <EditText
+        android:id="@+id/password_edittext"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@drawable/earpieceai_input_background"
+        android:hint="Enter your password"
+        android:inputType="textPassword"
+        android:textColor="@color/earpieceai_on_surface"
+        android:textColorHint="@color/earpieceai_hint"
+        android:layout_marginBottom="32dp" />
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/login_button"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Login"
+        style="@style/Widget.EarpieceAi.Button.Primary"
+        android:layout_marginBottom="16dp" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Don't have an account? Sign up at earpieceai.ai"
+        android:textSize="12sp"
+        android:textColor="@color/earpieceai_on_surface"
+        android:gravity="center"
+        android:layout_marginTop="16dp" />
+
+</LinearLayout>

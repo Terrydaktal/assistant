@@ -1,0 +1,213 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/earpieceai_gradient_background"
+    android:fillViewport="true"
+    android:fitsSystemWindows="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp"
+        android:gravity="center_horizontal">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Earpiece AI Setup Guide"
+            android:textSize="24sp"
+            android:textStyle="bold"
+            android:textColor="@color/earpieceai_on_background"
+            android:layout_marginBottom="24dp" />
+
+        <!-- Step 1: Restricted Features -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp"
+            android:background="@drawable/earpieceai_card_background"
+            android:layout_marginBottom="12dp">
+
+            <TextView
+                android:id="@+id/step1_title"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Step 1: Allow Restricted Settings"
+                android:textStyle="bold"
+                android:textSize="16sp"
+                android:textColor="@color/earpieceai_on_surface" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="On Android 13+, go to App Info -> 3 dots -> 'Allow restricted settings' so you can enable Accessibility."
+                android:textSize="14sp"
+                android:textColor="@color/earpieceai_on_surface"
+                android:layout_marginTop="4dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_step1"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Open App Info"
+                style="@style/Widget.EarpieceAi.Button.Secondary"
+                android:layout_marginTop="8dp" />
+        </LinearLayout>
+
+        <!-- Step 2: Accessibility -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp"
+            android:background="@drawable/earpieceai_card_background"
+            android:layout_marginBottom="12dp">
+
+            <TextView
+                android:id="@+id/step2_title"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Step 2: Enable Earpiece AI Service"
+                android:textStyle="bold"
+                android:textSize="16sp"
+                android:textColor="@color/earpieceai_on_surface" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Enable 'EarpieceAi Text Paster' in Accessibility settings for automatic pasting."
+                android:textSize="14sp"
+                android:textColor="@color/earpieceai_on_surface"
+                android:layout_marginTop="4dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/enable_accessibility_button"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Enable Accessibility"
+                style="@style/Widget.EarpieceAi.Button.Secondary"
+                android:layout_marginTop="8dp" />
+        </LinearLayout>
+
+        <!-- Step 3: Overlay -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp"
+            android:background="@drawable/earpieceai_card_background"
+            android:layout_marginBottom="12dp">
+
+            <TextView
+                android:id="@+id/step3_title"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Step 3: Display Over Other Apps"
+                android:textStyle="bold"
+                android:textSize="16sp"
+                android:textColor="@color/earpieceai_on_surface" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Allow overlay permission to show the floating recording button."
+                android:textSize="14sp"
+                android:textColor="@color/earpieceai_on_surface"
+                android:layout_marginTop="4dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_overlay"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Grant Overlay Permission"
+                style="@style/Widget.EarpieceAi.Button.Secondary"
+                android:layout_marginTop="8dp" />
+        </LinearLayout>
+
+        <!-- Step 4: Microphone -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp"
+            android:background="@drawable/earpieceai_card_background"
+            android:layout_marginBottom="12dp">
+
+            <TextView
+                android:id="@+id/step4_title"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Step 4: Microphone Access"
+                android:textStyle="bold"
+                android:textSize="16sp"
+                android:textColor="@color/earpieceai_on_surface" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Grant permission to record audio for transcription."
+                android:textSize="14sp"
+                android:textColor="@color/earpieceai_on_surface"
+                android:layout_marginTop="4dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_mic"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Grant Mic Permission"
+                style="@style/Widget.EarpieceAi.Button.Secondary"
+                android:layout_marginTop="8dp" />
+        </LinearLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="@color/earpieceai_surface_variant"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="16dp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/start_service_button"
+            android:layout_width="match_parent"
+            android:layout_height="60dp"
+            android:text="Start Earpiece AI"
+            android:textSize="18sp"
+            style="@style/Widget.EarpieceAi.Button.Primary"
+            android:layout_marginBottom="12dp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/stop_service_button"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Stop Service"
+            style="@style/Widget.EarpieceAi.Button.Secondary"
+            android:layout_marginBottom="12dp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/test_speech_button"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Test Phone Speech"
+            style="@style/Widget.EarpieceAi.Button.Secondary"
+            android:layout_marginBottom="12dp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/profile_button"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="View Profile"
+            style="@style/Widget.EarpieceAi.Button.Secondary"
+            android:layout_marginBottom="12dp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/config_button"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Log out"
+            style="@style/Widget.EarpieceAi.Button.Danger" />
+
+    </LinearLayout>
+</ScrollView>

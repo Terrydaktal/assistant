@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Earpiece AI Assistant</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Plus+Jakarta+Sans:wght@300;400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-container">
+    <header>
+      <div class="logo">
+        <span class="logo-dot"></span>
+        <h1>AI Earpiece Bridge</h1>
+      </div>
+      <div id="connection-status" class="status-badge connected">Ready</div>
+    </header>
+
+    <main>
+      <!-- State Indicator -->
+      <div class="state-container">
+        <p id="state-text">Tap the button to start speaking</p>
+      </div>
+
+      <!-- Pulse Button Visualizer -->
+      <div class="button-wrapper">
+        <div id="glow-ring" class="glow-ring"></div>
+        <button id="action-btn" class="action-btn">
+          <svg id="mic-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+            <path d="M19 10v1a7 7 0 0 1-14 0v-1"/>
+            <line x1="12" x2="12" y1="19" y2="22"/>
+          </svg>
+          <svg id="stop-icon" class="hidden" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect width="18" height="18" x="3" y="3" rx="2" ry="2"/>
+          </svg>
+        </button>
+      </div>
+
+      <!-- Transcript & Answer Area -->
+      <div class="terminal-container">
+        <div class="terminal-header">
+          <span class="term-dot red"></span>
+          <span class="term-dot yellow"></span>
+          <span class="term-dot green"></span>
+          <span class="term-title">Live Transcript</span>
+        </div>
+        <div class="terminal-body">
+          <div id="transcript-box" class="message-bubble user hidden">
+            <div class="bubble-label">You</div>
+            <p id="transcript-text"></p>
+          </div>
+          <div id="response-box" class="message-bubble assistant hidden">
+            <div class="bubble-label">Assistant</div>
+            <p id="response-text"></p>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- TTS Configuration Drawer -->
+    <footer>
+      <div class="settings-title">Speech Settings</div>
+      <div class="sliders">
+        <div class="slider-group">
+          <label for="tts-rate">Speed: <span id="rate-val">1.0x</span></label>
+          <input type="range" id="tts-rate" min="0.5" max="2.0" step="0.1" value="1.0">
+        </div>
+        <div class="slider-group">
+          <label for="tts-pitch">Pitch: <span id="pitch-val">1.0</span></label>
+          <input type="range" id="tts-pitch" min="0.5" max="1.5" step="0.1" value="1.0">
+        </div>
+      </div>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

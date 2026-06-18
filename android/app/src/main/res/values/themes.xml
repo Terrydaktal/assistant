@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.EarpieceAi" parent="Theme.MaterialComponents.NoActionBar">
+        <item name="colorPrimary">@color/earpieceai_primary</item>
+        <item name="colorPrimaryVariant">@color/earpieceai_primary_variant</item>
+        <item name="colorSecondary">@color/earpieceai_secondary</item>
+        <item name="colorSecondaryVariant">@color/earpieceai_secondary_variant</item>
+        <item name="colorOnPrimary">@color/earpieceai_on_primary</item>
+        <item name="colorOnSecondary">@color/earpieceai_on_secondary</item>
+        <item name="colorSurface">@color/earpieceai_surface</item>
+        <item name="colorOnSurface">@color/earpieceai_on_surface</item>
+        <item name="android:colorBackground">@color/earpieceai_background</item>
+        <item name="colorOnBackground">@color/earpieceai_on_background</item>
+        <item name="colorError">@color/earpieceai_error</item>
+        <item name="colorOnError">@color/earpieceai_on_error</item>
+
+        <item name="android:windowBackground">@color/earpieceai_background</item>
+        <item name="android:statusBarColor">@color/earpieceai_background</item>
+        <item name="android:navigationBarColor">@color/earpieceai_background</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+</resources>
