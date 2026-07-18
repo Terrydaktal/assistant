@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Exec=/home/lewis/Dev/assistant/desktop_dictation/toggle.sh
+Name=Desktop Dictation Toggle
+NoDisplay=true
+StartupNotify=false

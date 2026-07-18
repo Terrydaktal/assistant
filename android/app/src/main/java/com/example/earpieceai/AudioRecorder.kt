@@ -28,10 +28,15 @@ class AudioRecorder {
     private val audioBuffer = mutableListOf<Float>()
     private val bufferLock = Any()
     private var amplitudeListener: ((Float) -> Unit)? = null
+    private var audioChunkListener: ((ShortArray, Int) -> Unit)? = null
     private var lastAmplitudeDispatchMs = 0L
 
     fun setAmplitudeListener(listener: ((Float) -> Unit)?) {
         amplitudeListener = listener
+    }
+
+    fun setAudioChunkListener(listener: ((ShortArray, Int) -> Unit)?) {
+        audioChunkListener = listener
     }
 
     fun startRecording(scope: CoroutineScope) {
@@ -89,6 +94,7 @@ class AudioRecorder {
                                 audioBuffer.add(shortBuffer[i] / 32768.0f)
                             }
                         }
+                        audioChunkListener?.invoke(shortBuffer.copyOf(readResult), readResult)
                     } else if (readResult < 0) {
                         Log.e(TAG, "AudioRecord.read() failed with error: $readResult")
                         break
@@ -102,7 +108,7 @@ class AudioRecorder {
         }
     }
 
-    suspend fun stopRecordingAndGetData(): FloatArray? {
+    suspend fun stopRecordingAndGetData(maxSamples: Int? = null): FloatArray? {
         if (!isRecording.get()) {
             Log.w(TAG, "Not recording")
             return null
@@ -117,7 +123,12 @@ class AudioRecorder {
 
         val result = synchronized(bufferLock) {
             if (audioBuffer.isNotEmpty()) {
-                audioBuffer.toFloatArray().also {
+                val trimmed = if (maxSamples != null) {
+                    audioBuffer.take(maxSamples.coerceAtLeast(0)).toFloatArray()
+                } else {
+                    audioBuffer.toFloatArray()
+                }
+                trimmed.also {
                     Log.d(TAG, "Recording stopped, captured ${it.size} samples (${it.size / 16000.0f}s)")
                 }
             } else {
@@ -166,7 +177,15 @@ class AudioRecorder {
         }
     }
 
+    fun getSampleCount(): Int {
+        synchronized(bufferLock) {
+            return audioBuffer.size
+        }
+    }
+
     fun cleanup() {
+        amplitudeListener = null
+        audioChunkListener = null
         if (isRecording.get()) {
             Log.d(TAG, "Force cleanup while recording")
             isRecording.set(false)

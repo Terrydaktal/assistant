@@ -4,7 +4,7 @@ This workspace contains a completely standalone application bundle that routes v
 
 Responses are returned to your phone and spoken back into your earpiece using your phone's native, high-quality Text-to-Speech (TTS) engine.
 
-No modifications are made to any of your external repositories (`swiftsay`, `faster-whisperer`, or `chatbot`).
+Desktop dictation is included locally and shares the persistent Whisper service rather than loading another model.
 
 ---
 
@@ -16,8 +16,9 @@ No modifications are made to any of your external repositories (`swiftsay`, `fas
 ├── package-lock.json     # Node lockfile
 ├── pyproject.toml        # Python virtual environment configuration (uv)
 ├── uv.lock               # Python lockfile
-├── whisper_service.py    # Whisper-large-v3 CUDA server (FastAPI)
+├── whisper_service.py    # Configurable transcription server (FastAPI)
 ├── voice_bridge.js       # Voice Router / CDP browser automator (Node.js)
+├── desktop_dictation/    # Queued desktop recording, transcription, and safe typing
 ├── README.md             # This guide
 └── android/              # Standalone Android application client
     ├── app/
@@ -30,10 +31,11 @@ No modifications are made to any of your external repositories (`swiftsay`, `fas
 ## Script Breakdown
 
 ### 1. `whisper_service.py` (Local Whisper Server)
-Loads `whisper-large-v3` into memory on CUDA.
+Loads a selectable transcription backend into memory.
 - **Input:** POST request with binary audio payload at `/transcribe_raw`.
-- **Output:** JSON containing the decoded string `{"text": "..."}`.
-- **Backend:** Python + FastAPI + faster-whisper.
+- **Output:** JSON containing `{"text": "...", "backend": "...", "model": "..."}` plus variant-conversion metadata when enabled.
+- **Backends:** `faster-whisper` by default, or `nvidia/canary-qwen-2.5b` when started with the Canary backend.
+- **Optional post-processing:** deterministic English variant conversion (for example `en_US -> en_GB`) using the Trelis English Variant Converter library.
 
 ### 2. `voice_bridge.js` (Web Server & Puppeteer Automator)
 Connects to your active Chromium browser (remote-debugging on port `9233`) and acts as the broker between the phone and Google AI Mode.
@@ -52,6 +54,9 @@ A Kotlin-based Android app compiled and installed on your phone.
 - **Voice Bridge Request:** POSTs the FLAC audio payload to `http://<your-pc-ip>:9090/voice-command`.
 - **TTS rendering:** Leverages on-device Android `TextToSpeech` to speak responses back into the earpiece.
 
+### 4. `desktop_dictation/` (Desktop Dictation Client)
+`toggle.sh` starts or stops a uniquely named microphone recording. Completed recordings are processed in order by `queue-worker.sh`, sent to `whisper_service.py`, and inserted by `transcribe-and-type.py` through the modifier-safe `wayland-type-helper.sh`. Failed server requests remain queued under `$XDG_STATE_HOME/assistant-desktop-dictation/queue` for the next invocation, including across restarts. Modifier refusals are reported to `/client-event` and are not retried as delayed keyboard input.
+
 ---
 
 ## Setup & Running Guide
@@ -65,12 +70,27 @@ cd ~/Dev/chatbot
 *Note: This starts Chromium on debugging port `9233`.*
 
 ### Step 2: Start the Whisper Server
-Run the local GPU transcriber:
+Run the local transcriber. Default is `faster-whisper` with `large-v3`:
 ```bash
 cd ~/Dev/assistant
 uv run python whisper_service.py
 ```
-*It will load the model and listen on `http://0.0.0.0:5001`.*
+Or start it with Canary-Qwen 2.5B:
+```bash
+cd ~/Dev/assistant
+uv sync --extra canary
+uv run python whisper_service.py --backend canary-qwen --model nvidia/canary-qwen-2.5b
+```
+To force British spellings from a US-biased Whisper transcript:
+```bash
+cd ~/Dev/assistant
+uv run python whisper_service.py \
+  --backend faster-whisper \
+  --variant-conversion \
+  --variant-source en_US \
+  --variant-target en_GB
+```
+*It listens on `http://0.0.0.0:5001`. You can also override `--device`, `--compute-type`, `--host`, and `--port`, or use `WHISPER_BACKEND`, `WHISPER_MODEL`, `WHISPER_DEVICE`, `WHISPER_COMPUTE_TYPE`, `WHISPER_HOST`, and `WHISPER_PORT`. Variant conversion can also be controlled with `WHISPER_VARIANT_CONVERSION`, `WHISPER_VARIANT_SOURCE`, and `WHISPER_VARIANT_TARGET`.*
 
 ### Step 3: Start the Voice Bridge
 Run the main server:
@@ -80,7 +100,15 @@ node voice_bridge.js
 ```
 *It will listen on `http://0.0.0.0:9090`.*
 
-### Step 4: Install and Run the Android Client
+### Step 4: Configure Desktop Dictation
+Bind the numeric keypad `+` shortcut to:
+```bash
+/home/lewis/Dev/assistant/desktop_dictation/toggle.sh
+```
+The first press starts recording and the second press stops it, queues it, transcribes it through port `5001`, and types it only when no modifier key is held. Logs are written to `$XDG_STATE_HOME/assistant-desktop-dictation/dictation.log`.
+The included `net.local.trigger.sh.desktop` launcher preserves the existing KDE shortcut service ID when installed under `~/.local/share/applications`.
+
+### Step 5: Install and Run the Android Client
 1. Connect your Android phone to the PC with USB Debugging enabled.
 2. Build and install the app:
    ```bash

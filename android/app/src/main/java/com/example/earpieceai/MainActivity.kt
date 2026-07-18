@@ -1,20 +1,24 @@
 package com.example.earpieceai
 
+import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.ContentUris
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.ToneGenerator
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.MediaStore
 import android.provider.Settings
-import android.speech.tts.TextToSpeech
-import android.speech.tts.TextToSpeech.Engine
 import android.util.Log
 import android.widget.Button
+import android.widget.EditText
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -26,13 +30,9 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import java.util.Locale
-
-class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
+class MainActivity : AppCompatActivity() {
     companion object {
         private const val TAG = "MainActivity"
-        private const val GOOGLE_TTS_ENGINE = "com.google.android.tts"
-        private const val REQUEST_CHECK_TTS_DATA = 201
     }
 
     private lateinit var startServiceButton: Button
@@ -41,6 +41,21 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private lateinit var enableAccessibilityButton: Button
     private lateinit var configButton: Button
     private lateinit var profileButton: Button
+    private lateinit var voiceSettingsButton: Button
+    private lateinit var voiceSpeedButton: Button
+    private lateinit var speechEngineButton: Button
+    private lateinit var serverSettingsButton: Button
+    private lateinit var selectAudioButton: Button
+    private lateinit var selectLatestRecordingButton: Button
+    private lateinit var sendImportedAudioButton: Button
+    private lateinit var selectedVoiceValue: TextView
+    private lateinit var selectedVoiceSpeedValue: TextView
+    private lateinit var selectedEngineValue: TextView
+    private lateinit var serverAddressValue: TextView
+    private lateinit var selectedAudioValue: TextView
+    private lateinit var importedTailSecondsInput: EditText
+    private lateinit var importedResultValue: TextView
+    private lateinit var debugTimingValue: TextView
     
     private lateinit var btnStep1: Button
     private lateinit var btnOverlay: Button
@@ -53,12 +68,48 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private lateinit var earpieceaiApi: EarpieceAiApi
     private val coroutineScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var usageRetryJob: kotlinx.coroutines.Job? = null
-    private var testTts: TextToSpeech? = null
-    private var pendingTestSpeech: String? = null
+    private var debugRefreshJob: kotlinx.coroutines.Job? = null
+    private lateinit var sherpaTtsEngine: SherpaTtsEngine
+    private lateinit var sherpaSpeechController: SherpaSpeechController
+    private lateinit var googleTtsController: GoogleTtsController
+    private var selectedImportedAudioUri: Uri? = null
+    private val selectImportedAudioLauncher =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri == null) {
+                return@registerForActivityResult
+            }
+            try {
+                contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (e: SecurityException) {
+                Log.w(TAG, "Could not persist read permission for imported audio URI", e)
+            }
+            selectedImportedAudioUri = uri
+            val displayName = resolveImportedAudioDisplayName(uri)
+            ImportedAudioPreferences.saveSelectedAudio(this, uri.toString(), displayName)
+            updateImportedAudioSummary()
+        }
+    private val requestAudioLibraryPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (granted) {
+                chooseLatestRecording()
+            } else {
+                Toast.makeText(
+                    this,
+                    "Audio permission is required to find the latest recording",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         earpieceaiApi = EarpieceAiApi(this)
+        sherpaTtsEngine = SherpaTtsEngine(this)
+        sherpaSpeechController = SherpaSpeechController(sherpaTtsEngine)
+        googleTtsController = GoogleTtsController(this)
 
         setContentView(R.layout.activity_main)
 
@@ -68,6 +119,21 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         enableAccessibilityButton = findViewById(R.id.enable_accessibility_button)
         configButton = findViewById(R.id.config_button)
         profileButton = findViewById(R.id.profile_button)
+        voiceSettingsButton = findViewById(R.id.voice_settings_button)
+        voiceSpeedButton = findViewById(R.id.voice_speed_button)
+        speechEngineButton = findViewById(R.id.speech_engine_button)
+        serverSettingsButton = findViewById(R.id.server_settings_button)
+        selectAudioButton = findViewById(R.id.select_audio_button)
+        selectLatestRecordingButton = findViewById(R.id.select_latest_recording_button)
+        sendImportedAudioButton = findViewById(R.id.send_imported_audio_button)
+        selectedVoiceValue = findViewById(R.id.selected_voice_value)
+        selectedVoiceSpeedValue = findViewById(R.id.selected_voice_speed_value)
+        selectedEngineValue = findViewById(R.id.selected_engine_value)
+        serverAddressValue = findViewById(R.id.server_address_value)
+        selectedAudioValue = findViewById(R.id.selected_audio_value)
+        importedTailSecondsInput = findViewById(R.id.imported_tail_seconds_input)
+        importedResultValue = findViewById(R.id.imported_result_value)
+        debugTimingValue = findViewById(R.id.debug_timing_value)
         
         // Hide profile and config buttons for the standalone local version
         profileButton.visibility = android.view.View.GONE
@@ -90,64 +156,35 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         startServiceButton.setOnClickListener { checkAndStartFloatingService() }
         stopServiceButton.setOnClickListener { stopFloatingService() }
         testSpeechButton.setOnClickListener { testPhoneSpeech() }
+        speechEngineButton.setOnClickListener { openSpeechEngineDialog() }
+        voiceSettingsButton.setOnClickListener { openVoicePicker() }
+        voiceSpeedButton.setOnClickListener { openVoiceSpeedDialog() }
+        serverSettingsButton.setOnClickListener { openServerSettingsDialog() }
+        selectAudioButton.setOnClickListener { selectImportedAudioFile() }
+        selectLatestRecordingButton.setOnClickListener { chooseLatestRecordingWithPermission() }
+        sendImportedAudioButton.setOnClickListener { sendImportedAudioTail() }
         profileButton.setOnClickListener { openProfile() }
         configButton.setOnClickListener { handleLoginOrLogout() }
-    }
-
-    override fun onInit(status: Int) {
-        Log.d(TAG, "TTS onInit status=$status")
-        if (status != TextToSpeech.SUCCESS) {
-            testTts?.shutdown()
-            testTts = null
-            pendingTestSpeech = null
-            showTtsSetupDialog()
-            return
-        }
-
-        val engine = testTts ?: return
-        val languageResult = engine.setLanguage(Locale.getDefault())
-        Log.d(TAG, "TTS setLanguage(${Locale.getDefault()}) result=$languageResult")
-        if (languageResult == TextToSpeech.LANG_MISSING_DATA || languageResult == TextToSpeech.LANG_NOT_SUPPORTED) {
-            val fallbackResult = engine.setLanguage(Locale.US)
-            Log.d(TAG, "TTS setLanguage(${Locale.US}) fallback result=$fallbackResult")
-            if (fallbackResult == TextToSpeech.LANG_MISSING_DATA || fallbackResult == TextToSpeech.LANG_NOT_SUPPORTED) {
-                Toast.makeText(this, "TTS language data missing", Toast.LENGTH_LONG).show()
-                showTtsSetupDialog()
-                return
-            }
-        }
-        engine.setAudioAttributes(
-            AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_MEDIA)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                .build()
-        )
-
-        pendingTestSpeech?.let {
-            pendingTestSpeech = null
-            speakTestText(it)
-        }
-    }
-
-    @Deprecated("Deprecated in Java")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != REQUEST_CHECK_TTS_DATA) {
-            return
-        }
-
-        Log.d(TAG, "TTS data check result=$resultCode")
-        if (resultCode == Engine.CHECK_VOICE_DATA_PASS) {
-            initializeTestTts()
-        } else {
-            Toast.makeText(this, "TTS voice data missing: $resultCode", Toast.LENGTH_LONG).show()
-            showTtsSetupDialog()
-        }
+        restoreImportedAudioState()
+        preloadSelectedSpeechEngine()
+        updateSelectedVoiceSummary()
+        updateServerAddressSummary()
+        refreshDebugTimingPanel()
     }
 
     override fun onResume() {
         super.onResume()
         updateUiState()
+        updateSelectedVoiceSummary()
+        updateServerAddressSummary()
+        refreshDebugTimingPanel()
+        startDebugTimingRefreshLoop()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        debugRefreshJob?.cancel()
+        debugRefreshJob = null
     }
 
     private fun updateUiState() {
@@ -285,81 +322,446 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             Log.w(TAG, "Test beep failed", e)
         }
 
-        logVisibleTtsEngines()
-        if (testTts == null) {
-            pendingTestSpeech = message
-            checkTtsDataThenInitialize()
-            return
+        when (SpeechEnginePreferences.getSelectedEngine(this)) {
+            SpeechEnginePreferences.SpeechEngine.PIPER -> {
+                val voice = SherpaTtsPreferences.getSelectedVoice(this)
+                val speed = SherpaTtsPreferences.getVoiceSpeed(this)
+                sherpaSpeechController.speak(message, voice, speed, object : SherpaSpeechController.Listener {
+                    override fun onStart(totalDurationMs: Long) {
+                        runOnUiThread {
+                            Toast.makeText(
+                                this@MainActivity,
+                                "Piper playback started",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }
+
+                    override fun onProgress(positionMs: Long, totalDurationMs: Long, spokenCharIndex: Int) = Unit
+
+                    override fun onComplete() = Unit
+
+                    override fun onError(message: String, throwable: Throwable?) {
+                        Log.e(TAG, message, throwable)
+                        runOnUiThread {
+                            Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
+                        }
+                    }
+                })
+            }
+            SpeechEnginePreferences.SpeechEngine.GOOGLE -> {
+                googleTtsController.speak(message, SherpaTtsPreferences.getVoiceSpeed(this), object : GoogleTtsController.Listener {
+                    override fun onStart() {
+                        runOnUiThread {
+                            Toast.makeText(
+                                this@MainActivity,
+                                "Google TTS playback started",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }
+
+                    override fun onProgress(spokenCharIndex: Int) = Unit
+
+                    override fun onComplete() = Unit
+
+                    override fun onError(message: String, throwable: Throwable?) {
+                        Log.e(TAG, message, throwable)
+                        runOnUiThread {
+                            Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
+                        }
+                    }
+                })
+            }
         }
-        speakTestText(message)
     }
 
-    private fun checkTtsDataThenInitialize() {
-        val checkIntent = Intent(Engine.ACTION_CHECK_TTS_DATA).setPackage(GOOGLE_TTS_ENGINE)
-        if (checkIntent.resolveActivity(packageManager) == null) {
-            Log.w(TAG, "No TTS data checker found; initializing explicit engine")
-            initializeTestTts()
-            return
-        }
-        startActivityForResult(checkIntent, REQUEST_CHECK_TTS_DATA)
-    }
+    private fun openSpeechEngineDialog() {
+        val engines = SpeechEnginePreferences.SpeechEngine.entries
+        val currentEngine = SpeechEnginePreferences.getSelectedEngine(this)
+        val checkedIndex = engines.indexOf(currentEngine).takeIf { it >= 0 } ?: 0
+        val labels = engines.map { it.label }.toTypedArray()
+        var selectedIndex = checkedIndex
 
-    private fun initializeTestTts() {
-        testTts?.shutdown()
-        testTts = TextToSpeech(this, this, GOOGLE_TTS_ENGINE)
-    }
-
-    private fun logVisibleTtsEngines() {
-        val services = packageManager.queryIntentServices(
-            Intent(Engine.INTENT_ACTION_TTS_SERVICE),
-            PackageManager.MATCH_DEFAULT_ONLY
-        )
-        val engines = services.joinToString(", ") { service ->
-            service.serviceInfo?.packageName.orEmpty()
-        }.ifBlank { "none" }
-        Log.d(TAG, "Visible TTS engines: $engines")
-        Toast.makeText(this, "Visible TTS engines: $engines", Toast.LENGTH_LONG).show()
-    }
-
-    private fun showTtsSetupDialog() {
         AlertDialog.Builder(this)
-            .setTitle("TTS init failed")
-            .setMessage("Android did not provide a usable Text-to-Speech engine. Install or enable a TTS engine, then set it as the preferred engine.")
-            .setPositiveButton("TTS Settings") { _, _ -> openTtsSettings() }
-            .setNegativeButton("Install Voice Data") { _, _ -> openTtsDataInstaller() }
-            .setNeutralButton("Cancel", null)
+            .setTitle("Speech engine")
+            .setSingleChoiceItems(labels, checkedIndex) { _, which ->
+                selectedIndex = which
+            }
+            .setPositiveButton("Save") { _, _ ->
+                val engine = engines[selectedIndex]
+                SpeechEnginePreferences.saveSelectedEngine(this, engine)
+                preloadSelectedSpeechEngine()
+                updateSelectedVoiceSummary()
+                Toast.makeText(this, "${engine.label} selected", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
             .show()
     }
 
-    private fun openTtsSettings() {
-        val intents = listOf(
-            Intent("com.android.settings.TTS_SETTINGS"),
-            Intent(Settings.ACTION_SETTINGS)
-        )
-        startFirstAvailableIntent(intents)
+    private fun openVoicePicker() {
+        when (SpeechEnginePreferences.getSelectedEngine(this)) {
+            SpeechEnginePreferences.SpeechEngine.PIPER -> showSherpaVoicePickerDialog()
+            SpeechEnginePreferences.SpeechEngine.GOOGLE -> showGoogleVoicePickerDialog()
+        }
     }
 
-    private fun openTtsDataInstaller() {
-        val intents = listOf(
-            Intent(Engine.ACTION_INSTALL_TTS_DATA),
-            Intent("com.android.settings.TTS_SETTINGS"),
-            Intent(Settings.ACTION_SETTINGS)
-        )
-        startFirstAvailableIntent(intents)
+    private fun showSherpaVoicePickerDialog() {
+        val voiceOptions = SherpaVoiceCatalog.voices
+        val checkedIndex = voiceOptions.indexOfFirst {
+            it.id == SherpaTtsPreferences.getSelectedVoiceId(this)
+        }.takeIf { it >= 0 } ?: 0
+        val labels = voiceOptions.map { it.label }.toTypedArray()
+        var selectedIndex = checkedIndex
+
+        AlertDialog.Builder(this)
+            .setTitle("Piper voice")
+            .setSingleChoiceItems(labels, checkedIndex) { _, which ->
+                selectedIndex = which
+            }
+            .setPositiveButton("Save") { _, _ ->
+                val option = voiceOptions[selectedIndex]
+                SherpaTtsPreferences.saveSelectedVoiceId(this, option.id)
+                sherpaTtsEngine.release()
+                coroutineScope.launch(Dispatchers.Default) {
+                    runCatching {
+                        sherpaTtsEngine.preload(option, SherpaTtsPreferences.getVoiceSpeed(this@MainActivity))
+                    }.onFailure { error ->
+                        Log.w(TAG, "Sherpa preload failed after voice change", error)
+                    }
+                }
+                updateSelectedVoiceSummary(option.label)
+                Toast.makeText(this, "Piper voice updated", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
-    private fun startFirstAvailableIntent(intents: List<Intent>) {
-        val intent = intents.firstOrNull { it.resolveActivity(packageManager) != null }
-        if (intent == null) {
-            Toast.makeText(this, "No matching settings screen found", Toast.LENGTH_LONG).show()
+    private fun showGoogleVoicePickerDialog() {
+        googleTtsController.getVoiceOptions { result ->
+            runOnUiThread {
+                result.onSuccess { voiceOptions ->
+                    val currentVoiceName = TtsVoicePreferences.getSelectedVoiceName(this)
+                    val checkedIndex = voiceOptions.indexOfFirst { it.voiceName == currentVoiceName }
+                        .takeIf { it >= 0 } ?: 0
+                    val labels = voiceOptions.map { it.label }.toTypedArray()
+                    var selectedIndex = checkedIndex
+
+                    AlertDialog.Builder(this)
+                        .setTitle("Google TTS voice")
+                        .setSingleChoiceItems(labels, checkedIndex) { _, which ->
+                            selectedIndex = which
+                        }
+                        .setPositiveButton("Save") { _, _ ->
+                            val option = voiceOptions[selectedIndex]
+                            TtsVoicePreferences.saveSelectedVoiceName(this, option.voiceName)
+                            googleTtsController.applySavedVoice { applyResult ->
+                                runOnUiThread {
+                                    applyResult.onSuccess { label ->
+                                        updateSelectedVoiceSummary(label)
+                                        Toast.makeText(this, "Google TTS voice updated", Toast.LENGTH_SHORT).show()
+                                    }.onFailure { error ->
+                                        Log.e(TAG, "Failed to apply Google TTS voice", error)
+                                        Toast.makeText(this, "Google TTS voice update failed", Toast.LENGTH_LONG).show()
+                                        updateSelectedVoiceSummary()
+                                    }
+                                }
+                            }
+                        }
+                        .setNegativeButton("Cancel", null)
+                        .show()
+                }.onFailure { error ->
+                    Log.e(TAG, "Failed to load Google TTS voices", error)
+                    Toast.makeText(
+                        this,
+                        "Google TTS voices unavailable: ${error.message ?: "Unknown error"}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
+    }
+
+    private fun openVoiceSpeedDialog() {
+        val speedOptions = listOf(0.8f, 0.9f, 1.0f, 1.1f, 1.2f, 1.35f, 1.5f)
+        val currentSpeed = SherpaTtsPreferences.getVoiceSpeed(this)
+        val checkedIndex = speedOptions.indexOfFirst { kotlin.math.abs(it - currentSpeed) < 0.01f }
+            .takeIf { it >= 0 } ?: 2
+        val labels = speedOptions.map { formatVoiceSpeed(it) }.toTypedArray()
+        var selectedIndex = checkedIndex
+
+        AlertDialog.Builder(this)
+            .setTitle("Assistant voice speed")
+            .setSingleChoiceItems(labels, checkedIndex) { _, which ->
+                selectedIndex = which
+            }
+            .setPositiveButton("Save") { _, _ ->
+                val speed = speedOptions[selectedIndex]
+                SherpaTtsPreferences.saveVoiceSpeed(this, speed)
+                sherpaTtsEngine.release()
+                coroutineScope.launch(Dispatchers.Default) {
+                    runCatching {
+                        sherpaTtsEngine.preload(SherpaTtsPreferences.getSelectedVoice(this@MainActivity), speed)
+                    }.onFailure { error ->
+                        Log.w(TAG, "Sherpa preload failed after speed change", error)
+                    }
+                }
+                updateSelectedVoiceSummary()
+                preloadSelectedSpeechEngine()
+                Toast.makeText(this, "Voice speed updated", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun updateSelectedVoiceSummary(overrideLabel: String? = null) {
+        val engine = SpeechEnginePreferences.getSelectedEngine(this)
+        val label = overrideLabel ?: when (engine) {
+            SpeechEnginePreferences.SpeechEngine.PIPER -> SherpaTtsPreferences.getSelectedVoice(this).label
+            SpeechEnginePreferences.SpeechEngine.GOOGLE -> "Google TTS voice"
+        }
+        selectedEngineValue.text = engine.label
+        selectedVoiceValue.text = label
+        selectedVoiceSpeedValue.text = formatVoiceSpeed(SherpaTtsPreferences.getVoiceSpeed(this))
+        voiceSettingsButton.text = when (engine) {
+            SpeechEnginePreferences.SpeechEngine.PIPER -> "Choose Piper voice"
+            SpeechEnginePreferences.SpeechEngine.GOOGLE -> "Choose Google TTS voice"
+        }
+    }
+
+    private fun formatVoiceSpeed(speed: Float): String {
+        return "Speed ${String.format(java.util.Locale.US, "%.2fx", speed)}"
+    }
+
+    private fun updateServerAddressSummary() {
+        serverAddressValue.text = VoiceBridgePreferences.getDisplayValue(this)
+    }
+
+    private fun restoreImportedAudioState() {
+        selectedImportedAudioUri = ImportedAudioPreferences.getSelectedUri(this)?.let(Uri::parse)
+        importedTailSecondsInput.setText(ImportedAudioPreferences.getTailSeconds(this).toString())
+        updateImportedAudioSummary()
+    }
+
+    private fun updateImportedAudioSummary() {
+        selectedAudioValue.text = ImportedAudioPreferences.getSelectedDisplayName(this)
+    }
+
+    private fun selectImportedAudioFile() {
+        selectImportedAudioLauncher.launch(arrayOf("audio/mpeg", "audio/mp4", "audio/*"))
+    }
+
+    private fun chooseLatestRecordingWithPermission() {
+        val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.READ_MEDIA_AUDIO
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+            ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+        ) {
+            chooseLatestRecording()
+        } else {
+            requestAudioLibraryPermissionLauncher.launch(permission)
+        }
+    }
+
+    private fun chooseLatestRecording() {
+        coroutineScope.launch(Dispatchers.IO) {
+            val result = runCatching { findLatestRecordingInRecordersFolder() }
+            kotlinx.coroutines.withContext(Dispatchers.Main) {
+                val latest = result.getOrElse { error ->
+                    Log.e(TAG, "Failed to find latest recording", error)
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Could not search the Recorders folder: ${error.message ?: "Unknown error"}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    return@withContext
+                }
+                if (latest == null) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "No MP3 or M4A recording found in the Recorders folder",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    return@withContext
+                }
+                selectedImportedAudioUri = latest.first
+                ImportedAudioPreferences.saveSelectedAudio(
+                    this@MainActivity,
+                    latest.first.toString(),
+                    latest.second
+                )
+                updateImportedAudioSummary()
+                Toast.makeText(
+                    this@MainActivity,
+                    "Selected latest recording: ${latest.second}",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+    }
+
+    private fun findLatestRecordingInRecordersFolder(): Pair<Uri, String>? {
+        val collection = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+        val projection = buildList {
+            add(MediaStore.Audio.Media._ID)
+            add(MediaStore.Audio.Media.DISPLAY_NAME)
+            add(MediaStore.Audio.Media.DATE_MODIFIED)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                add(MediaStore.Audio.Media.RELATIVE_PATH)
+            } else {
+                add(MediaStore.Audio.Media.DATA)
+            }
+        }.toTypedArray()
+        val pathColumn = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            MediaStore.Audio.Media.RELATIVE_PATH
+        } else {
+            MediaStore.Audio.Media.DATA
+        }
+        val selection = "$pathColumn LIKE ?"
+        val selectionArgs = arrayOf("%Recorders/%")
+        val sortOrder = "${MediaStore.Audio.Media.DATE_MODIFIED} DESC"
+
+        contentResolver.query(collection, projection, selection, selectionArgs, sortOrder)?.use { cursor ->
+            val idIndex = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
+            val nameIndex = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME)
+            while (cursor.moveToNext()) {
+                val displayName = cursor.getString(nameIndex).orEmpty()
+                if (!displayName.endsWith(".mp3", ignoreCase = true) &&
+                    !displayName.endsWith(".m4a", ignoreCase = true)
+                ) {
+                    continue
+                }
+                val uri = ContentUris.withAppendedId(collection, cursor.getLong(idIndex))
+                return uri to displayName
+            }
+        }
+        return null
+    }
+
+    private fun resolveImportedAudioDisplayName(uri: Uri): String {
+        return contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+            ?.use { cursor ->
+                if (!cursor.moveToFirst()) {
+                    return@use null
+                }
+                val columnIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                if (columnIndex < 0) {
+                    null
+                } else {
+                    cursor.getString(columnIndex)
+                }
+            }
+            ?: (uri.lastPathSegment ?: "Selected audio")
+    }
+
+    private fun sendImportedAudioTail() {
+        val uri = selectedImportedAudioUri
+        if (uri == null) {
+            Toast.makeText(this, "Choose an MP3 or M4A recording first", Toast.LENGTH_LONG).show()
             return
         }
-        startActivity(intent)
+        val tailSeconds = importedTailSecondsInput.text.toString().trim().toIntOrNull()
+        if (tailSeconds == null || tailSeconds <= 0) {
+            Toast.makeText(this, "Enter how many seconds from the end to send", Toast.LENGTH_LONG).show()
+            return
+        }
+        ImportedAudioPreferences.saveTailSeconds(this, tailSeconds)
+        sendImportedAudioButton.isEnabled = false
+        sendImportedAudioButton.text = "Sending..."
+        importedResultValue.text = "Extracting selected recording tail..."
+
+        coroutineScope.launch {
+            try {
+                val result = ImportedAudioTailSender.sendTail(
+                    context = this@MainActivity,
+                    uri = uri,
+                    tailSeconds = tailSeconds,
+                    whisperBaseUrl = VoiceBridgePreferences.getWhisperBaseUrl(this@MainActivity)
+                )
+                val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("Imported audio transcription", result.transcription))
+                importedResultValue.text =
+                    "Transcription (copied to clipboard):\n${result.transcription}\n\n${result.timingSummary}"
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Transcription copied")
+                    .setMessage(result.transcription)
+                    .setPositiveButton("OK", null)
+                    .show()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send imported audio tail", e)
+                importedResultValue.text =
+                    "Error: ${e.message ?: "Unknown error"}\n\n" +
+                        DebugTimingStore.getLastTiming(this@MainActivity)
+                Toast.makeText(
+                    this@MainActivity,
+                    "Imported audio failed: ${e.message ?: "Unknown error"}",
+                    Toast.LENGTH_LONG
+                ).show()
+            } finally {
+                sendImportedAudioButton.isEnabled = true
+                sendImportedAudioButton.text = "Transcribe selected tail"
+            }
+        }
     }
 
-    private fun speakTestText(message: String) {
-        val result = testTts?.speak(message, TextToSpeech.QUEUE_FLUSH, null, "main_test_speech")
-        Toast.makeText(this, "TTS speak() result: $result", Toast.LENGTH_SHORT).show()
+    private fun openServerSettingsDialog() {
+        val hostInput = EditText(this).apply {
+            hint = "Host or domain"
+            setText(VoiceBridgePreferences.getHost(this@MainActivity))
+            setSingleLine()
+        }
+        val portInput = EditText(this).apply {
+            hint = "Port"
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setText(VoiceBridgePreferences.getPort(this@MainActivity).toString())
+            setSingleLine()
+        }
+        val container = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            val pad = (20 * resources.displayMetrics.density).toInt()
+            setPadding(pad, pad / 2, pad, 0)
+            addView(hostInput)
+            addView(portInput)
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("PC server address")
+            .setMessage("Set the IP address or domain and port for the local voice bridge.")
+            .setView(container)
+            .setPositiveButton("Save") { _, _ ->
+                val host = hostInput.text.toString().trim()
+                val port = portInput.text.toString().trim().toIntOrNull()
+                if (host.isBlank()) {
+                    Toast.makeText(this, "Host or domain is required", Toast.LENGTH_LONG).show()
+                    return@setPositiveButton
+                }
+                if (port == null || port !in 1..65535) {
+                    Toast.makeText(this, "Port must be between 1 and 65535", Toast.LENGTH_LONG).show()
+                    return@setPositiveButton
+                }
+                VoiceBridgePreferences.save(this, host, port)
+                updateServerAddressSummary()
+                Toast.makeText(this, "PC server address updated", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun refreshDebugTimingPanel() {
+        debugTimingValue.text = DebugTimingStore.getLastTiming(this)
+    }
+
+    private fun startDebugTimingRefreshLoop() {
+        debugRefreshJob?.cancel()
+        debugRefreshJob = coroutineScope.launch {
+            while (isActive) {
+                refreshDebugTimingPanel()
+                delay(1000)
+            }
+        }
     }
 
     private fun isAccessibilityServiceEnabled(): Boolean {
@@ -430,13 +832,47 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     override fun onDestroy() {
         super.onDestroy()
-        testTts?.stop()
-        testTts?.shutdown()
+        sherpaSpeechController.release()
+        googleTtsController.release()
         coroutineScope.cancel()
+    }
+
+    private fun preloadSelectedSpeechEngine() {
+        when (SpeechEnginePreferences.getSelectedEngine(this)) {
+            SpeechEnginePreferences.SpeechEngine.PIPER -> {
+                coroutineScope.launch(Dispatchers.Default) {
+                    runCatching {
+                        sherpaTtsEngine.preload(
+                            SherpaTtsPreferences.getSelectedVoice(this@MainActivity),
+                            SherpaTtsPreferences.getVoiceSpeed(this@MainActivity)
+                        )
+                    }.onFailure { error ->
+                        Log.w(TAG, "Sherpa preload failed in activity", error)
+                    }
+                }
+            }
+            SpeechEnginePreferences.SpeechEngine.GOOGLE -> {
+                googleTtsController.warmUp { result ->
+                    result.onSuccess {
+                        googleTtsController.applySavedVoice { applyResult ->
+                            applyResult.onSuccess { label ->
+                                runOnUiThread { updateSelectedVoiceSummary(label) }
+                            }.onFailure { error ->
+                                Log.w(TAG, "Google TTS applySavedVoice failed in activity", error)
+                            }
+                        }
+                    }.onFailure { error ->
+                        Log.w(TAG, "Google TTS warmup failed in activity", error)
+                    }
+                }
+            }
+        }
     }
 
     override fun onStop() {
         super.onStop()
+        debugRefreshJob?.cancel()
+        debugRefreshJob = null
         usageRetryJob?.cancel()
         usageRetryJob = null
         if (earpieceaiApi.isLoggedIn()) {

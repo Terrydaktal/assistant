@@ -194,6 +194,229 @@
             style="@style/Widget.EarpieceAi.Button.Secondary"
             android:layout_marginBottom="12dp" />
 
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp"
+            android:background="@drawable/earpieceai_card_background"
+            android:layout_marginBottom="12dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Assistant voice"
+                android:textStyle="bold"
+                android:textSize="16sp"
+                android:textColor="@color/earpieceai_on_surface" />
+
+            <TextView
+                android:id="@+id/selected_engine_value"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Piper"
+                android:textSize="14sp"
+                android:textColor="@color/earpieceai_on_surface"
+                android:layout_marginTop="4dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/speech_engine_button"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Choose speech engine"
+                style="@style/Widget.EarpieceAi.Button.Secondary"
+                android:layout_marginTop="8dp" />
+
+            <TextView
+                android:id="@+id/selected_voice_value"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="System default"
+                android:textSize="14sp"
+                android:textColor="@color/earpieceai_on_surface"
+                android:layout_marginTop="4dp" />
+
+            <TextView
+                android:id="@+id/selected_voice_speed_value"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Speed 1.00x"
+                android:textSize="14sp"
+                android:textColor="@color/earpieceai_on_surface"
+                android:layout_marginTop="4dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/voice_settings_button"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Choose assistant voice"
+                style="@style/Widget.EarpieceAi.Button.Secondary"
+                android:layout_marginTop="8dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/voice_speed_button"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Adjust voice speed"
+                style="@style/Widget.EarpieceAi.Button.Secondary"
+                android:layout_marginTop="8dp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp"
+            android:background="@drawable/earpieceai_card_background"
+            android:layout_marginBottom="12dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Imported recording tail"
+                android:textStyle="bold"
+                android:textSize="16sp"
+                android:textColor="@color/earpieceai_on_surface" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Pick an MP3 or M4A file, transcribe the last N seconds with the Whisper service, and copy the result to the clipboard."
+                android:textSize="14sp"
+                android:textColor="@color/earpieceai_on_surface"
+                android:layout_marginTop="4dp" />
+
+            <TextView
+                android:id="@+id/selected_audio_value"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="No file selected"
+                android:textSize="14sp"
+                android:textColor="@color/earpieceai_on_surface"
+                android:layout_marginTop="8dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/select_audio_button"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Choose audio recording"
+                style="@style/Widget.EarpieceAi.Button.Secondary"
+                android:layout_marginTop="8dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/select_latest_recording_button"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Choose latest recording"
+                style="@style/Widget.EarpieceAi.Button.Secondary"
+                android:layout_marginTop="8dp" />
+
+            <com.google.android.material.textfield.TextInputLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp">
+
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/imported_tail_seconds_input"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:hint="Seconds from end (e.g. 30 or 120)"
+                    android:inputType="number" />
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/send_imported_audio_button"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Transcribe selected tail"
+                style="@style/Widget.EarpieceAi.Button.Primary"
+                android:layout_marginTop="10dp" />
+
+            <TextView
+                android:id="@+id/imported_result_value"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:background="@color/earpieceai_surface_variant"
+                android:padding="12dp"
+                android:text="No imported audio request yet."
+                android:textColor="@color/earpieceai_on_surface"
+                android:textIsSelectable="true"
+                android:textSize="13sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp"
+            android:background="@drawable/earpieceai_card_background"
+            android:layout_marginBottom="12dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="PC server"
+                android:textStyle="bold"
+                android:textSize="16sp"
+                android:textColor="@color/earpieceai_on_surface" />
+
+            <TextView
+                android:id="@+id/server_address_value"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="192.168.50.51:9090"
+                android:textSize="14sp"
+                android:textColor="@color/earpieceai_on_surface"
+                android:layout_marginTop="4dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/server_settings_button"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Change server address"
+                style="@style/Widget.EarpieceAi.Button.Secondary"
+                android:layout_marginTop="8dp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp"
+            android:background="@drawable/earpieceai_card_background"
+            android:layout_marginBottom="12dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Debug timing"
+                android:textStyle="bold"
+                android:textSize="16sp"
+                android:textColor="@color/earpieceai_on_surface" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Latest voice request timing from the floating assistant service."
+                android:textSize="14sp"
+                android:textColor="@color/earpieceai_on_surface"
+                android:layout_marginTop="4dp" />
+
+            <TextView
+                android:id="@+id/debug_timing_value"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:background="@color/earpieceai_surface_variant"
+                android:padding="12dp"
+                android:text="No timing captured yet."
+                android:textColor="@color/earpieceai_on_surface"
+                android:textIsSelectable="true"
+                android:textSize="13sp"
+                android:typeface="monospace" />
+        </LinearLayout>
+
         <com.google.android.material.button.MaterialButton
             android:id="@+id/profile_button"
             android:layout_width="match_parent"

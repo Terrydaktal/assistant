@@ -15,3 +15,12 @@ node_modules/
 android/.gradle/
 android/.kotlin/
 android/app/build/
+
+# Local transcription recovery audio
+.transcription_recovery/
+
+# Desktop dictation runtime files (normally stored under XDG_RUNTIME_DIR)
+.desktop-dictation-runtime/
+
+# Temporary local worktrees and scratch files
+.tmp/

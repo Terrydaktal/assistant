@@ -3,6 +3,7 @@ package com.example.earpieceai
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.media.AudioFocusRequest
@@ -11,10 +12,15 @@ import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.os.Build
+import android.os.Bundle
 import android.os.IBinder
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.util.Log
 import android.view.*
 import android.widget.ImageButton
@@ -35,23 +41,22 @@ import android.provider.MediaStore
 import android.media.MediaCodec
 import android.media.MediaCodecList
 import android.media.MediaFormat
-import android.media.ToneGenerator
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.io.IOException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import javax.net.ssl.SSLHandshakeException
+import java.util.ArrayDeque
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 import okio.BufferedSink
 import okhttp3.RequestBody.Companion.asRequestBody
 import kotlinx.coroutines.delay
 import java.io.FileInputStream
-import android.speech.tts.TextToSpeech
-import android.speech.tts.UtteranceProgressListener
-import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 
-class FloatingButtonService : Service(), TextToSpeech.OnInitListener {
+class FloatingButtonService : Service() {
 
     companion object {
         private const val TAG = "FloatingButtonService"
@@ -59,9 +64,19 @@ class FloatingButtonService : Service(), TextToSpeech.OnInitListener {
         private const val DEEPINFRA_LANGUAGE = "en"
         private const val DEEPINFRA_INITIAL_PROMPT = "Hello."
         private const val DEEPINFRA_TEMPERATURE = "0"
-        private const val DEBUG_SAVE_WAV = true
-        private const val TTS_UTTERANCE_ID = "voice_bridge_utterance"
-        private const val GOOGLE_TTS_ENGINE = "com.google.android.tts"
+        private const val LATEST_RECORDING_FILE_NAME = "latest_recording.flac"
+        private const val LOCAL_COMMAND_COOLDOWN_MS = 1500L
+        private const val AUDIO_SAMPLE_RATE = 16000
+        private const val LONG_COMMAND_DURATION_SAMPLES = (AUDIO_SAMPLE_RATE * 1.2f).toInt()
+        private const val SHORT_COMMAND_DURATION_SAMPLES = (AUDIO_SAMPLE_RATE * 0.9f).toInt()
+        private const val STREAM_DETECTION_SAFETY_SAMPLES = (AUDIO_SAMPLE_RATE * 0.15f).toInt()
+        private const val SPEECH_REWIND_MS = 10_000L
+        private const val SPEECH_REWIND_FALLBACK_CHARS_PER_SECOND = 14.0
+        private const val VOICE_BRIDGE_CONNECT_TIMEOUT_SECONDS = 10L
+        private const val VOICE_BRIDGE_ACK_TIMEOUT_SECONDS = 10L
+        private const val VOICE_BRIDGE_RESULT_MAX_WAIT_MS = 180000L
+        private const val VOICE_UPLOAD_QUEUE_DIR = "voice_upload_queue"
+        private const val VOICE_UPLOAD_RETRY_DELAY_MS = 3_000L
     }
 
     private lateinit var windowManager: WindowManager
@@ -75,15 +90,34 @@ class FloatingButtonService : Service(), TextToSpeech.OnInitListener {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var usageRetryJob: Job? = null
 
-    private var tts: TextToSpeech? = null
-    private var isTtsInitialized = false
-    private var pendingSpeechText: String? = null
+    private lateinit var sherpaTtsEngine: SherpaTtsEngine
+    private lateinit var sherpaSpeechController: SherpaSpeechController
+    private lateinit var googleTtsController: GoogleTtsController
     private var audioFocusRequest: AudioFocusRequest? = null
+    private var lastAssistantResponse: String? = null
+    private var voskLocalCommandRecognizer: VoskLocalCommandRecognizer? = null
+    private var useAndroidSpeechFallback = false
+    private var localCommandRecognizer: SpeechRecognizer? = null
+    private var isLocalCommandListening = false
+    private var lastLocalCommandAt = 0L
+    private var recordingStopTrimSampleCount: Int? = null
+    private var localCommandStatus = "Starting local listener..."
+    private val isTtsSpeaking = AtomicBoolean(false)
+    private var currentSpokenText: String? = null
+    private var currentSpeechStartMs = 0L
+    private var currentSpeechStartCharOffset = 0
+    private var currentSpeechCharIndex = 0
+    private val speechProgressPoints = mutableListOf<SpeechProgressPoint>()
+    private var pendingVoiceRequestTiming: VoiceRequestTiming? = null
+    private var currentSpeechDurationMs = 0L
+    private val voiceUploadQueue = ArrayDeque<QueuedVoiceRecording>()
+    private val voiceUploadQueueLock = Any()
+    private var voiceUploadWorkerJob: Job? = null
 
     private var isRecording = false
     private var lastRecordingDurationSeconds = 0.0
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
+        .connectTimeout(VOICE_BRIDGE_CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
         .addInterceptor(LoggingInterceptor())
@@ -112,12 +146,72 @@ class FloatingButtonService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
+    private data class VoiceBridgeResult(
+        val transcription: String,
+        val response: String,
+        val action: String,
+        val serverTimings: ServerTimingBreakdown? = null
+    )
+
+    private data class VoiceBridgeAck(
+        val requestId: String
+    )
+
+    private data class ServerTimingBreakdown(
+        val bridgeUploadBodyReadMs: Long? = null,
+        val whisperRequestMs: Long? = null,
+        val uploadBodyReadMs: Long? = null,
+        val tempWriteMs: Long? = null,
+        val transcribeMs: Long? = null,
+        val postprocessMs: Long? = null,
+        val serverTotalMs: Long? = null,
+        val aiMs: Long? = null,
+        val totalProcessMs: Long? = null
+    )
+
+    private data class VoiceRequestTiming(
+        var requestId: String = "",
+        val recordingStopStartedMs: Long,
+        var audioSamples: Int = 0,
+        var flacBytes: Long = 0L,
+        var flacEncodeMs: Long = -1L,
+        var uploadAckMs: Long = -1L,
+        var serverPushWaitMs: Long = -1L,
+        var responseReceivedMs: Long = -1L,
+        var ttsStartMs: Long? = null,
+        var serverTimings: ServerTimingBreakdown? = null
+    )
+
+    private data class LocalBridgeCommand(
+        val action: String,
+        val chatNumber: Int? = null,
+        val direction: String? = null
+    )
+
+    private data class QueuedVoiceRecording(
+        val audioFile: File,
+        val recordingStopStartedMs: Long,
+        val audioSampleCount: Int,
+        val flacEncodeMs: Long,
+        val queuedAtMs: Long = SystemClock.elapsedRealtime(),
+        var attemptCount: Int = 0
+    )
+
+    private data class SpeechProgressPoint(
+        val elapsedMs: Long,
+        val charIndex: Int
+    )
+
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "Service onCreate called")
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         earpieceaiApi = EarpieceAiApi(this)
-        initializeTts()
+        sherpaTtsEngine = SherpaTtsEngine(this)
+        sherpaSpeechController = SherpaSpeechController(sherpaTtsEngine)
+        googleTtsController = GoogleTtsController(this)
+        preloadSelectedSpeechEngine()
+        cleanUnservedVoiceUploadsOnStart()
         startUsageRetryLoop()
         serviceScope.launch {
             flushPendingUsageOnce("service-start")
@@ -134,7 +228,8 @@ class FloatingButtonService : Service(), TextToSpeech.OnInitListener {
             return
         }
 
-        startForeground(NotificationHelper.createNotificationId(), NotificationHelper.createForegroundNotification(this))
+        localCommandStatus = "Starting local listener..."
+        startForegroundWithMicType(localCommandStatus)
 
         val inflater = getSystemService(LAYOUT_INFLATER_SERVICE) as LayoutInflater
         floatingView = inflater.inflate(R.layout.layout_floating_button, null)
@@ -167,6 +262,20 @@ class FloatingButtonService : Service(), TextToSpeech.OnInitListener {
         setupTouch(params)
         setupClick()
         updateRecordButtonVisuals()
+        initializeLocalCommandRecognizer()
+    }
+
+    private fun startForegroundWithMicType(status: String) {
+        val notification = NotificationHelper.createForegroundNotification(this, status)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NotificationHelper.createNotificationId(),
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            )
+        } else {
+            startForeground(NotificationHelper.createNotificationId(), notification)
+        }
     }
 
     private fun setupTouch(params: WindowManager.LayoutParams) {
@@ -277,112 +386,628 @@ class FloatingButtonService : Service(), TextToSpeech.OnInitListener {
     private fun setupClick() {
         recordButton.setOnClickListener {
             Log.d(TAG, "Record button clicked. Recording: $isRecording")
+            toggleAiRecording()
+        }
+    }
 
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-                Log.e(TAG, "Record audio permission not granted")
-                showToast("Microphone permission required", Toast.LENGTH_LONG)
-                return@setOnClickListener
+    private fun toggleAiRecording() {
+        if (isRecording) {
+            stopAiRecordingAndProcess()
+        } else {
+            startAiRecording()
+        }
+    }
+
+    private fun startAiRecording() {
+        if (isRecording) {
+            return
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            Log.e(TAG, "Record audio permission not granted")
+            showToast("Microphone permission required", Toast.LENGTH_LONG)
+            return
+        }
+
+        serviceScope.launch {
+            recordingStopTrimSampleCount = null
+            withContext(Dispatchers.Main) {
+                updateLocalCommandStatus("Paused local listener while recording for AI...")
+                stopLocalCommandListening()
+                waveformView.setActive(true)
+                waveformView.setAmplitude(0f)
             }
-
-            if (!isRecording) {
-                serviceScope.launch {
-                    withContext(Dispatchers.Main) {
-                        waveformView.setActive(true)
-                        waveformView.setAmplitude(0f)
-                    }
-                    try {
-                        audioRecorder.setAmplitudeListener { level ->
-                            val normalized = (level * 10f).coerceIn(0f, 1f)
-                            mainHandler.post {
-                                waveformView.setAmplitude(normalized)
-                            }
-                        }
-                        audioRecorder.startRecording(serviceScope)
-                        // Refresh token in background while user is speaking
-                        launch { earpieceaiApi.getDeepInfraToken() }
-                        withContext(Dispatchers.Main) {
-                            isRecording = true
-                            recordButton.isActivated = true
-                            updateRecordButtonVisuals()
-                            showToast("🎤 Recording...", Toast.LENGTH_SHORT)
-                            Log.d(TAG, "Recording started")
-                        }
-                        lastRecordingDurationSeconds = 0.0
-                    } catch (e: Exception) {
-                        audioRecorder.setAmplitudeListener(null)
-                        Log.e(TAG, "Failed to start recording", e)
-                        withContext(Dispatchers.Main) {
-                            waveformView.setActive(false)
-                            showToast("Failed to start recording: ${e.message}", Toast.LENGTH_LONG)
-                        }
+            try {
+                audioRecorder.setAmplitudeListener { level ->
+                    val normalized = (level * 10f).coerceIn(0f, 1f)
+                    mainHandler.post {
+                        waveformView.setAmplitude(normalized)
                     }
                 }
-            } else {
-                serviceScope.launch {
-                    withContext(Dispatchers.Main) {
-                        isRecording = false
-                        recordButton.isActivated = false
-                        updateRecordButtonVisuals()
-                        waveformView.setAmplitude(0f)
-                        waveformView.setActive(false)
-                        showToast("⏳ Processing...", Toast.LENGTH_SHORT)
-                        Log.d(TAG, "Stopping recording and processing...")
-                    }
-
-                    var audioData: FloatArray? = null
-                    var flacFile: File? = null
-
-                    try {
-                        audioData = audioRecorder.stopRecordingAndGetData()
-
-                        if (audioData != null && audioData.isNotEmpty()) {
-                            lastRecordingDurationSeconds = audioData.size / 16000.0
-                            Log.d(TAG, "Audio data received: ${audioData.size} samples (${audioData.size / 16000.0f}s)")
-
-                            flacFile = saveAudioToFlac(audioData)
-
-                            if (flacFile != null && flacFile.exists() && flacFile.length() > 0) {
-                                Log.d(TAG, "Audio saved to FLAC: ${flacFile.length()} bytes")
-                                if (DEBUG_SAVE_WAV) {
-                                    saveDebugCopyToDownloads(flacFile)
-                                }
-
-                                withContext(Dispatchers.Main) {
-                                    showToast("Sending audio to PC...", Toast.LENGTH_SHORT)
-                                }
-                                val responseText = sendToVoiceBridge(flacFile)
-                                withContext(Dispatchers.Main) {
-                                    showToast("Response received; starting speech", Toast.LENGTH_SHORT)
-                                    showToast("🤖 AI: $responseText", Toast.LENGTH_LONG)
-                                }
-                                speakText(responseText)
-                            } else {
-                                Log.w(TAG, "Failed to save audio to FLAC or file is empty")
-                                withContext(Dispatchers.Main) {
-                                    showToast("❌ Failed to save audio", Toast.LENGTH_SHORT)
-                                }
-                            }
-                        } else {
-                            Log.w(TAG, "No audio data recorded")
-                            lastRecordingDurationSeconds = 0.0
-                            waveformView.setActive(false)
-                            withContext(Dispatchers.Main) {
-                                showToast("❌ No audio recorded", Toast.LENGTH_SHORT)
-                            }
-                        }
-                    } catch (e: CancellationException) {
-                        Log.w(TAG, "Processing cancelled")
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error during processing", e)
-                        withContext(Dispatchers.Main) {
-                            showToast("❌ Processing error: ${e.message?.take(50)}", Toast.LENGTH_LONG)
-                        }
-                    } finally {
-                        audioRecorder.setAmplitudeListener(null)
-                        cleanupTempFiles(flacFile)
+                val streamCommandsEnabled = voskLocalCommandRecognizer?.beginStreamMode() == true
+                audioRecorder.setAudioChunkListener { buffer, count ->
+                    if (streamCommandsEnabled) {
+                        voskLocalCommandRecognizer?.acceptStreamAudio(buffer, count)
                     }
                 }
+                audioRecorder.startRecording(serviceScope)
+                // Refresh token in background while user is speaking.
+                launch { earpieceaiApi.getDeepInfraToken() }
+                withContext(Dispatchers.Main) {
+                    isRecording = true
+                    recordButton.isActivated = true
+                    updateRecordButtonVisuals()
+                    showToast("Recording for AI. Say kilo vesta end to send or kilo vesta cancel to discard.", Toast.LENGTH_SHORT)
+                    Log.d(TAG, "Recording started")
+                }
+                lastRecordingDurationSeconds = 0.0
+            } catch (e: Exception) {
+                audioRecorder.setAmplitudeListener(null)
+                audioRecorder.setAudioChunkListener(null)
+                voskLocalCommandRecognizer?.endStreamMode()
+                Log.e(TAG, "Failed to start recording", e)
+                withContext(Dispatchers.Main) {
+                    waveformView.setActive(false)
+                    startLocalCommandListening()
+                    showToast("Failed to start recording: ${e.message}", Toast.LENGTH_LONG)
+                }
             }
+        }
+    }
+
+    private fun stopAiRecordingAndProcess(discardRecording: Boolean = false) {
+        if (!isRecording) {
+            return
+        }
+        serviceScope.launch {
+            withContext(Dispatchers.Main) {
+                isRecording = false
+                recordButton.isActivated = false
+                updateRecordButtonVisuals()
+                waveformView.setAmplitude(0f)
+                waveformView.setActive(false)
+                if (discardRecording) {
+                    showToast("Cancelling AI recording...", Toast.LENGTH_SHORT)
+                    Log.d(TAG, "Stopping recording and discarding audio...")
+                } else {
+                    showToast("Processing AI recording...", Toast.LENGTH_SHORT)
+                    Log.d(TAG, "Stopping recording and processing...")
+                }
+            }
+
+            val recordingStopStartedMs = SystemClock.elapsedRealtime()
+
+            try {
+                val audioData = audioRecorder.stopRecordingAndGetData(recordingStopTrimSampleCount)
+
+                if (discardRecording) {
+                    val discardedSamples = audioData?.size ?: 0
+                    Log.d(TAG, "AI recording cancelled locally; discarded $discardedSamples samples before upload")
+                    lastRecordingDurationSeconds = 0.0
+                    withContext(Dispatchers.Main) {
+                        showToast("AI recording cancelled", Toast.LENGTH_SHORT)
+                    }
+                    return@launch
+                }
+
+                if (audioData != null && audioData.isNotEmpty()) {
+                    lastRecordingDurationSeconds = audioData.size / 16000.0
+                    Log.d(TAG, "Audio data received: ${audioData.size} samples (${audioData.size / 16000.0f}s)")
+
+                    val flacStartedAt = SystemClock.elapsedRealtime()
+                    val flacFile = saveAudioToFlac(audioData)
+                    val flacEncodeMs =
+                        (SystemClock.elapsedRealtime() - flacStartedAt).coerceAtLeast(0L)
+
+                    if (flacFile != null && flacFile.exists() && flacFile.length() > 0) {
+                        Log.d(TAG, "Audio saved to FLAC: ${flacFile.length()} bytes")
+                        saveLatestRecordingToDownloads(flacFile)
+                        enqueueVoiceRecording(
+                            QueuedVoiceRecording(
+                                audioFile = flacFile,
+                                recordingStopStartedMs = recordingStopStartedMs,
+                                audioSampleCount = audioData.size,
+                                flacEncodeMs = flacEncodeMs
+                            )
+                        )
+                    } else {
+                        Log.w(TAG, "Failed to save audio to FLAC or file is empty")
+                        withContext(Dispatchers.Main) {
+                            showToast("Failed to save audio", Toast.LENGTH_SHORT)
+                        }
+                        logVoiceRequestTiming(
+                            "failed:flac",
+                            VoiceRequestTiming(
+                                recordingStopStartedMs = recordingStopStartedMs,
+                                audioSamples = audioData.size,
+                                flacEncodeMs = flacEncodeMs,
+                                responseReceivedMs =
+                                    (SystemClock.elapsedRealtime() - recordingStopStartedMs).coerceAtLeast(0L)
+                            )
+                        )
+                    }
+                } else {
+                    Log.w(TAG, "No audio data recorded")
+                    lastRecordingDurationSeconds = 0.0
+                    waveformView.setActive(false)
+                    withContext(Dispatchers.Main) {
+                        showToast("No audio recorded", Toast.LENGTH_SHORT)
+                    }
+                }
+            } catch (e: CancellationException) {
+                Log.w(TAG, "Processing cancelled")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error during processing", e)
+                withContext(Dispatchers.Main) {
+                    showToast("Processing error: ${e.message?.take(50)}", Toast.LENGTH_LONG)
+                }
+            } finally {
+                recordingStopTrimSampleCount = null
+                audioRecorder.setAmplitudeListener(null)
+                audioRecorder.setAudioChunkListener(null)
+                voskLocalCommandRecognizer?.endStreamMode()
+                withContext(Dispatchers.Main) {
+                    startLocalCommandListening()
+                }
+            }
+        }
+    }
+
+    private fun initializeLocalCommandRecognizer() {
+        voskLocalCommandRecognizer = VoskLocalCommandRecognizer(
+            context = applicationContext,
+            onCommandText = { text ->
+                mainHandler.post { handleLocalCommandText(text) }
+            },
+            onStreamCommandText = { text, sampleCount ->
+                mainHandler.post { handleStreamCommandText(text, sampleCount) }
+            },
+            onStatus = { status ->
+                mainHandler.post { updateLocalCommandStatus(status) }
+            },
+            onUnavailable = { reason ->
+                mainHandler.post {
+                    Log.w(TAG, reason)
+                    updateLocalCommandStatus("$reason Falling back to Android recognizer.")
+                    useAndroidSpeechFallback = true
+                    initializeAndroidSpeechRecognizer()
+                    startLocalCommandListening()
+                }
+            }
+        )
+        voskLocalCommandRecognizer?.initialize()
+    }
+
+    private fun initializeAndroidSpeechRecognizer() {
+        if (localCommandRecognizer != null) {
+            return
+        }
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            Log.w(TAG, "SpeechRecognizer is not available for local commands")
+            updateLocalCommandStatus("Local voice commands unavailable.")
+            showToast("Local voice commands are unavailable on this device.", Toast.LENGTH_LONG)
+            return
+        }
+
+        localCommandRecognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
+            setRecognitionListener(object : RecognitionListener {
+                override fun onReadyForSpeech(params: Bundle?) {
+                    Log.d(TAG, "Local command recognizer ready")
+                    updateLocalCommandStatus("Mic active: say kilo vesta begin.")
+                }
+
+                override fun onBeginningOfSpeech() {
+                    Log.d(TAG, "Local command recognizer detected speech")
+                    updateLocalCommandStatus("Heard speech; checking local command...")
+                }
+
+                override fun onRmsChanged(rmsdB: Float) = Unit
+
+                override fun onBufferReceived(buffer: ByteArray?) = Unit
+
+                override fun onEndOfSpeech() {
+                    Log.d(TAG, "Local command recognizer end of speech")
+                }
+
+                override fun onError(error: Int) {
+                    isLocalCommandListening = false
+                    val errorName = speechRecognizerErrorName(error)
+                    Log.d(TAG, "Local command recognizer error=$errorName")
+                    updateLocalCommandStatus("Local listener restarting: $errorName")
+                    scheduleLocalCommandRestart()
+                }
+
+                override fun onResults(results: Bundle?) {
+                    isLocalCommandListening = false
+                    updateLocalCommandStatus("Processing local speech...")
+                    handleLocalCommandResults(results)
+                    scheduleLocalCommandRestart()
+                }
+
+                override fun onPartialResults(partialResults: Bundle?) {
+                    handleLocalCommandResults(partialResults)
+                }
+
+                override fun onEvent(eventType: Int, params: Bundle?) = Unit
+            })
+        }
+    }
+
+    private fun createLocalCommandIntent(): Intent {
+        return Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 700L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 500L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 500L)
+        }
+    }
+
+    private fun startLocalCommandListening() {
+        if (isRecording || isLocalCommandListening) {
+            return
+        }
+        if (!useAndroidSpeechFallback) {
+            voskLocalCommandRecognizer?.startListening()
+            return
+        }
+        val recognizer = localCommandRecognizer ?: return
+        try {
+            recognizer.startListening(createLocalCommandIntent())
+            isLocalCommandListening = true
+            updateLocalCommandStatus("Listening locally for kilo vesta begin/end/stop.")
+            Log.d(TAG, "Started local command listening")
+        } catch (e: Exception) {
+            isLocalCommandListening = false
+            Log.e(TAG, "Failed to start local command listening", e)
+            updateLocalCommandStatus("Local listener failed to start: ${e.message?.take(40)}")
+            scheduleLocalCommandRestart()
+        }
+    }
+
+    private fun stopLocalCommandListening() {
+        if (!useAndroidSpeechFallback) {
+            voskLocalCommandRecognizer?.stopListening()
+        }
+        isLocalCommandListening = false
+        try {
+            localCommandRecognizer?.cancel()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to stop local command recognizer", e)
+        }
+    }
+
+    private fun scheduleLocalCommandRestart() {
+        if (isRecording) {
+            return
+        }
+        mainHandler.removeCallbacks(restartLocalCommandRunnable)
+        mainHandler.postDelayed(restartLocalCommandRunnable, 350L)
+    }
+
+    private val restartLocalCommandRunnable = Runnable {
+        startLocalCommandListening()
+    }
+
+    private fun handleLocalCommandResults(results: Bundle?) {
+        val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty()
+        if (matches.isEmpty()) {
+            return
+        }
+        val command = matches
+            .map { normalizeLocalCommandText(it) }
+            .firstOrNull { isLocalCommandPhrase(it) }
+            ?: return
+        handleNormalizedLocalCommand(command)
+    }
+
+    private fun handleLocalCommandText(text: String) {
+        val command = normalizeLocalCommandText(text)
+        if (!isLocalCommandPhrase(command)) {
+            return
+        }
+        handleNormalizedLocalCommand(command)
+    }
+
+    private fun handleStreamCommandText(text: String, detectedSampleCount: Int) {
+        val command = normalizeLocalCommandText(text)
+        if (!isLocalCommandPhrase(command)) {
+            return
+        }
+        handleNormalizedLocalCommand(command, detectedSampleCount)
+    }
+
+    private fun handleNormalizedLocalCommand(command: String, detectedSampleCount: Int? = null) {
+        val now = System.currentTimeMillis()
+        if (now - lastLocalCommandAt < LOCAL_COMMAND_COOLDOWN_MS) {
+            return
+        }
+        lastLocalCommandAt = now
+        Log.d(TAG, "Handling local voice command: $command")
+        if (isRecording) {
+            when {
+                isCancelRecordingCommand(command) -> {
+                    stopAiRecordingAndProcess(discardRecording = true)
+                }
+                isStopSpeakingCommand(command) -> {
+                    recordingStopTrimSampleCount = detectedSampleCount?.let {
+                        estimateStreamTrimSampleCount(command, it)
+                    } ?: estimateRecordingTrimSampleCount(command)
+                    stopAiRecordingAndProcess()
+                }
+                else -> {
+                    Log.d(TAG, "Ignoring local command while AI recording is active: $command")
+                }
+            }
+            return
+        }
+        when {
+            isBeginRecordingCommand(command) -> {
+                startAiRecording()
+                showToast("AI recording started", Toast.LENGTH_SHORT)
+            }
+            isCreateNewChatCommand(command) -> {
+                executeLocalBridgeCommand(
+                    LocalBridgeCommand(action = "create_new_chat"),
+                    "Creating new chat..."
+                )
+            }
+            isListChatsCommand(command) -> {
+                executeLocalBridgeCommand(
+                    LocalBridgeCommand(action = "list_chats"),
+                    "Listing chats..."
+                )
+            }
+            isSelectChatCommand(command) -> {
+                val chatNumber = extractSelectedChatNumber(command)
+                if (chatNumber == null) {
+                    showToast("Could not tell which chat number to open", Toast.LENGTH_SHORT)
+                } else {
+                    executeLocalBridgeCommand(
+                        LocalBridgeCommand(action = "select_chat", chatNumber = chatNumber),
+                        "Opening chat $chatNumber..."
+                    )
+                }
+            }
+            isGoBackCommand(command) -> {
+                executeLocalBridgeCommand(
+                    LocalBridgeCommand(action = "navigate_chat_message", direction = "back"),
+                    "Reading previous message..."
+                )
+            }
+            isGoForwardCommand(command) -> {
+                executeLocalBridgeCommand(
+                    LocalBridgeCommand(action = "navigate_chat_message", direction = "forward"),
+                    "Reading next message..."
+                )
+            }
+            isEndRecordingCommand(command) -> {
+                stopAiRecordingAndProcess()
+            }
+            isStopSpeakingCommand(command) -> {
+                stopSpeaking()
+                showToast("Speech stopped", Toast.LENGTH_SHORT)
+            }
+            isRewindCommand(command) -> {
+                rewindCurrentSpeech()
+            }
+            isRepeatCommand(command) -> {
+                val previous = lastAssistantResponse
+                if (previous.isNullOrBlank()) {
+                    showToast("No previous response to repeat", Toast.LENGTH_SHORT)
+                } else {
+                    speakText(previous)
+                }
+            }
+        }
+    }
+
+    private fun normalizeLocalCommandText(text: String): String {
+        return text
+            .lowercase(Locale.getDefault())
+            .replace(Regex("[^a-z0-9 ]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+
+    private fun isLocalCommandPhrase(text: String): Boolean {
+        return isBeginRecordingCommand(text) ||
+            isCreateNewChatCommand(text) ||
+            isListChatsCommand(text) ||
+            isSelectChatCommand(text) ||
+            isGoBackCommand(text) ||
+            isGoForwardCommand(text) ||
+            isCancelRecordingCommand(text) ||
+            isEndRecordingCommand(text) ||
+            isStopSpeakingCommand(text) ||
+            isRewindCommand(text) ||
+            isRepeatCommand(text)
+    }
+
+    private fun isBeginRecordingCommand(text: String): Boolean {
+        val words = text.split(' ')
+        return hasWakePhrase(text) && words.any { it == "begin" || it == "start" }
+    }
+
+    private fun isCreateNewChatCommand(text: String): Boolean {
+        val words = text.split(' ')
+        return hasWakePhrase(text) &&
+            words.contains("chat") &&
+            (words.contains("create") || words.contains("new"))
+    }
+
+    private fun isListChatsCommand(text: String): Boolean {
+        val words = text.split(' ')
+        return hasWakePhrase(text) &&
+            (words.contains("list") || words.contains("show")) &&
+            words.any { it == "chat" || it == "chats" }
+    }
+
+    private fun isSelectChatCommand(text: String): Boolean {
+        val words = text.split(' ')
+        return hasWakePhrase(text) &&
+            (words.contains("select") || words.contains("open")) &&
+            words.contains("chat") &&
+            extractSelectedChatNumber(text) != null
+    }
+
+    private fun isGoBackCommand(text: String): Boolean {
+        val words = text.split(' ')
+        return hasWakePhrase(text) &&
+            (words.contains("back") || words.windowed(2).any { it[0] == "go" && it[1] == "back" })
+    }
+
+    private fun isGoForwardCommand(text: String): Boolean {
+        val words = text.split(' ')
+        return hasWakePhrase(text) &&
+            (words.contains("forward") || words.windowed(2).any { it[0] == "go" && it[1] == "forward" })
+    }
+
+    private fun isEndRecordingCommand(text: String): Boolean {
+        val words = text.split(' ')
+        return hasWakePhrase(text) && words.any { it == "end" || it == "send" || it == "finish" || it == "done" }
+    }
+
+    private fun isCancelRecordingCommand(text: String): Boolean {
+        val words = text.split(' ')
+        return hasWakePhrase(text) && words.any { it == "cancel" || it == "discard" || it == "abort" }
+    }
+
+    private fun isStopSpeakingCommand(text: String): Boolean {
+        return hasWakePhrase(text) && text.split(' ').any { it == "stop" }
+    }
+
+    private fun isRewindCommand(text: String): Boolean {
+        val words = text.split(' ')
+        return hasWakePhrase(text) && words.any { it == "rewind" }
+    }
+
+    private fun isRepeatCommand(text: String): Boolean {
+        val words = text.split(' ')
+        return hasWakePhrase(text) && words.any { it == "repeat" || it == "replay" || it == "again" }
+    }
+
+    private fun extractSelectedChatNumber(text: String): Int? {
+        val normalized = text.split(' ').filter { it.isNotBlank() }
+        val chatIndex = normalized.indexOf("chat")
+        if (chatIndex == -1 || chatIndex + 1 >= normalized.size) {
+            return null
+        }
+        val candidateTokens = normalized.drop(chatIndex + 1)
+            .filterNot { it == "number" || it == "chat" }
+        val numberToken = candidateTokens.firstOrNull() ?: return null
+        return parseSpokenNumber(numberToken)
+    }
+
+    private fun parseSpokenNumber(token: String): Int? {
+        return token.toIntOrNull() ?: when (token) {
+            "one" -> 1
+            "two" -> 2
+            "three" -> 3
+            "four" -> 4
+            "five" -> 5
+            "six" -> 6
+            "seven" -> 7
+            "eight" -> 8
+            "nine" -> 9
+            "ten" -> 10
+            else -> null
+        }
+    }
+
+    private fun computeSpeechRewindIndex(spokenText: String): Int {
+        val elapsedMs = if (currentSpeechStartMs > 0L) {
+            (SystemClock.elapsedRealtime() - currentSpeechStartMs).coerceAtLeast(0L)
+        } else {
+            0L
+        }
+        if (elapsedMs < SPEECH_REWIND_MS) {
+            return fallbackSpeechRewindIndex(spokenText)
+        }
+        val targetElapsed = (elapsedMs - SPEECH_REWIND_MS).coerceAtLeast(0L)
+        synchronized(speechProgressPoints) {
+            val point = speechProgressPoints.lastOrNull { it.elapsedMs <= targetElapsed }
+            if (point != null) {
+                return point.charIndex.coerceIn(0, spokenText.length)
+            }
+        }
+        return fallbackSpeechRewindIndex(spokenText)
+    }
+
+    private fun fallbackSpeechRewindIndex(spokenText: String): Int {
+        val fallbackChars = ((SPEECH_REWIND_MS / 1000.0) * SPEECH_REWIND_FALLBACK_CHARS_PER_SECOND).toInt()
+        return (currentSpeechCharIndex - fallbackChars).coerceIn(0, spokenText.length)
+    }
+
+    private fun estimateRecordingTrimSampleCount(command: String): Int {
+        val currentSamples = audioRecorder.getSampleCount()
+        val trimTailSamples = when {
+            command.contains("stop talking") || command.contains("stop speaking") -> LONG_COMMAND_DURATION_SAMPLES
+            command.contains("finish") -> LONG_COMMAND_DURATION_SAMPLES
+            else -> SHORT_COMMAND_DURATION_SAMPLES
+        }
+        return (currentSamples - trimTailSamples).coerceAtLeast(0)
+    }
+
+    private fun estimateStreamTrimSampleCount(command: String, detectedSampleCount: Int): Int {
+        val commandDurationSamples = when {
+            command.contains("stop talking") || command.contains("stop speaking") -> LONG_COMMAND_DURATION_SAMPLES
+            command.contains("finish") -> LONG_COMMAND_DURATION_SAMPLES
+            else -> SHORT_COMMAND_DURATION_SAMPLES
+        }
+        return (detectedSampleCount - commandDurationSamples - STREAM_DETECTION_SAFETY_SAMPLES).coerceAtLeast(0)
+    }
+
+    private fun hasWakePhrase(text: String): Boolean {
+        val words = text.split(' ').filter { it.isNotBlank() }
+        if (words.any { it in wakeWordVariants }) {
+            return true
+        }
+        return words.zipWithNext().any { (first, second) ->
+            "$first $second" in wakePhraseVariants
+        }
+    }
+
+    private val wakeWordVariants = setOf(
+        "kilovesta",
+        "kilofesta",
+        "kilofester",
+        "kilovestor",
+        "keelovesta",
+        "keelofesta"
+    )
+
+    private val wakePhraseVariants = setOf(
+        "kilo vesta",
+        "kilo festa",
+        "kilo fester",
+        "kilo vestor",
+        "keelo vesta",
+        "keelo festa"
+    )
+
+    private fun updateLocalCommandStatus(status: String) {
+        localCommandStatus = status
+        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+        notificationManager.notify(
+            NotificationHelper.createNotificationId(),
+            NotificationHelper.createForegroundNotification(this, status)
+        )
+    }
+
+    private fun speechRecognizerErrorName(error: Int): String {
+        return when (error) {
+            SpeechRecognizer.ERROR_AUDIO -> "audio error"
+            SpeechRecognizer.ERROR_CLIENT -> "client error"
+            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "missing mic permission"
+            SpeechRecognizer.ERROR_NETWORK -> "network error"
+            SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "network timeout"
+            SpeechRecognizer.ERROR_NO_MATCH -> "no command heard"
+            SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "recognizer busy"
+            SpeechRecognizer.ERROR_SERVER -> "server error"
+            SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "speech timeout"
+            else -> "error $error"
         }
     }
 
@@ -718,6 +1343,120 @@ class FloatingButtonService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
+    private fun voiceUploadQueueDir(): File {
+        return File(cacheDir, VOICE_UPLOAD_QUEUE_DIR).apply {
+            if (!exists() && !mkdirs()) {
+                Log.w(TAG, "Failed to create voice upload queue dir: $absolutePath")
+            }
+        }
+    }
+
+    private fun cleanUnservedVoiceUploadsOnStart() {
+        val queueDir = voiceUploadQueueDir()
+        val files = queueDir.listFiles().orEmpty()
+        var deletedCount = 0
+        for (file in files) {
+            if (!file.isFile) {
+                continue
+            }
+            if (file.delete()) {
+                deletedCount++
+            } else {
+                Log.w(TAG, "Failed to clean unserved voice upload on start: ${file.name}")
+            }
+        }
+        if (deletedCount > 0) {
+            Log.d(TAG, "Cleaned $deletedCount unserved voice upload(s) on service start")
+        }
+    }
+
+    private fun enqueueVoiceRecording(recording: QueuedVoiceRecording) {
+        val queueSize = synchronized(voiceUploadQueueLock) {
+            voiceUploadQueue.addLast(recording)
+            voiceUploadQueue.size
+        }
+        Log.d(
+            TAG,
+            "Queued voice recording file=${recording.audioFile.name} bytes=${recording.audioFile.length()} " +
+                "samples=${recording.audioSampleCount} queueSize=$queueSize"
+        )
+        showToast("Queued AI recording ($queueSize pending)", Toast.LENGTH_SHORT)
+        startVoiceUploadWorker()
+    }
+
+    private fun startVoiceUploadWorker() {
+        synchronized(voiceUploadQueueLock) {
+            if (voiceUploadWorkerJob?.isActive == true) {
+                return
+            }
+            voiceUploadWorkerJob = serviceScope.launch {
+                processVoiceUploadQueue()
+            }
+        }
+    }
+
+    private suspend fun processVoiceUploadQueue() {
+        while (currentCoroutineContext().isActive) {
+            val recording = synchronized(voiceUploadQueueLock) {
+                if (voiceUploadQueue.isEmpty()) null else voiceUploadQueue.removeFirst()
+            } ?: break
+
+            serveQueuedVoiceRecording(recording)
+        }
+        synchronized(voiceUploadQueueLock) {
+            if (voiceUploadQueue.isEmpty()) {
+                voiceUploadWorkerJob = null
+            } else {
+                voiceUploadWorkerJob = serviceScope.launch {
+                    processVoiceUploadQueue()
+                }
+            }
+        }
+    }
+
+    private suspend fun serveQueuedVoiceRecording(recording: QueuedVoiceRecording) {
+        while (currentCoroutineContext().isActive) {
+            if (!recording.audioFile.exists() || recording.audioFile.length() <= 0L) {
+                Log.w(TAG, "Dropping queued voice recording with missing/empty file: ${recording.audioFile.absolutePath}")
+                return
+            }
+
+            recording.attemptCount++
+            try {
+                withContext(Dispatchers.Main) {
+                    showToast("Sending queued AI recording ${recording.attemptCount}", Toast.LENGTH_SHORT)
+                }
+                val bridgeResult = sendToVoiceBridge(
+                    audioFile = recording.audioFile,
+                    recordingStopStartedMs = recording.recordingStopStartedMs,
+                    audioSampleCount = recording.audioSampleCount,
+                    flacEncodeMs = recording.flacEncodeMs
+                )
+                withContext(Dispatchers.Main) {
+                    showToast("Response received; starting speech", Toast.LENGTH_SHORT)
+                    showToast("AI: ${bridgeResult.response}", Toast.LENGTH_LONG)
+                }
+                handleVoiceBridgeResult(bridgeResult)
+                cleanupTempFiles(recording.audioFile)
+                return
+            } catch (e: CancellationException) {
+                Log.w(TAG, "Queued voice upload cancelled; keeping file for startup cleanup: ${recording.audioFile.name}")
+                throw e
+            } catch (e: Exception) {
+                Log.e(
+                    TAG,
+                    "Queued voice upload failed; will retry without deleting file=${recording.audioFile.name} " +
+                        "attempt=${recording.attemptCount}",
+                    e
+                )
+                withContext(Dispatchers.Main) {
+                    showToast("Queued AI upload failed; retrying", Toast.LENGTH_LONG)
+                }
+                delay(VOICE_UPLOAD_RETRY_DELAY_MS)
+            }
+        }
+    }
+
     private fun cleanupTempFiles(vararg files: File?) {
         for (file in files) {
             if (file != null && file.exists()) {
@@ -812,8 +1551,7 @@ class FloatingButtonService : Service(), TextToSpeech.OnInitListener {
             return null
         }
 
-        val outputFile = File.createTempFile("audio_", ".flac", cacheDir)
-        outputFile.deleteOnExit()
+        val outputFile = File.createTempFile("queued_voice_", ".flac", voiceUploadQueueDir())
 
         val pcmBytes = ByteBuffer.allocate(pcmData.size * 2).order(ByteOrder.LITTLE_ENDIAN)
         for (sample in pcmData) {
@@ -914,12 +1652,12 @@ class FloatingButtonService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
-    private fun saveDebugCopyToDownloads(source: File) {
+    private fun saveLatestRecordingToDownloads(source: File) {
         try {
-            val extension = source.extension.lowercase().ifEmpty { "flac" }
-            val fileName = "earpieceai_${System.currentTimeMillis()}.$extension"
-            val mimeType = if (extension == "flac") "audio/flac" else "audio/wav"
+            val fileName = LATEST_RECORDING_FILE_NAME
+            val mimeType = "audio/flac"
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                deleteExistingDownloadRecordingsQ()
                 val values = ContentValues().apply {
                     put(MediaStore.Downloads.DISPLAY_NAME, fileName)
                     put(MediaStore.Downloads.MIME_TYPE, mimeType)
@@ -928,7 +1666,7 @@ class FloatingButtonService : Service(), TextToSpeech.OnInitListener {
                 val resolver = contentResolver
                 val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
                 if (uri == null) {
-                    Log.w(TAG, "Failed to create MediaStore entry for debug WAV")
+                    Log.w(TAG, "Failed to create MediaStore entry for latest recording")
                     return
                 }
                 resolver.openOutputStream(uri)?.use { output ->
@@ -936,27 +1674,43 @@ class FloatingButtonService : Service(), TextToSpeech.OnInitListener {
                         input.copyTo(output)
                     }
                 }
-                Log.d(TAG, "Saved debug WAV to Downloads/EarpieceAI/$fileName (uri=$uri)")
+                Log.d(TAG, "Saved latest recording to Downloads/EarpieceAI/$fileName (uri=$uri)")
             } else {
-                val downloadsDir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+                val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
                 if (downloadsDir == null) {
-                    Log.w(TAG, "External downloads dir unavailable; skipping debug WAV save")
+                    Log.w(TAG, "External downloads dir unavailable; skipping latest recording save")
                     return
                 }
-                if (!downloadsDir.exists()) {
-                    downloadsDir.mkdirs()
+                val targetDir = File(downloadsDir, "EarpieceAI")
+                if (!targetDir.exists()) {
+                    targetDir.mkdirs()
                 }
-                val target = File(downloadsDir, fileName)
+                targetDir.listFiles()?.forEach { existing ->
+                    if (existing.isFile && existing.extension.equals("flac", ignoreCase = true)) {
+                        existing.delete()
+                    }
+                }
+                val target = File(targetDir, fileName)
                 FileInputStream(source).use { input ->
                     target.outputStream().use { output ->
                         input.copyTo(output)
                     }
                 }
-                Log.d(TAG, "Saved debug WAV to ${target.absolutePath}")
+                Log.d(TAG, "Saved latest recording to ${target.absolutePath}")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to save debug WAV", e)
+            Log.e(TAG, "Failed to save latest recording", e)
         }
+    }
+
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.Q)
+    private fun deleteExistingDownloadRecordingsQ() {
+        val resolver = contentResolver
+        val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+        val relativePath = Environment.DIRECTORY_DOWNLOADS + "/EarpieceAI/"
+        val selection = "${MediaStore.Downloads.RELATIVE_PATH}=? AND ${MediaStore.Downloads.DISPLAY_NAME} LIKE ?"
+        val selectionArgs = arrayOf(relativePath, "%.flac")
+        resolver.delete(collection, selection, selectionArgs)
     }
 
     private fun logLong(tag: String, message: String) {
@@ -983,82 +1737,6 @@ class FloatingButtonService : Service(), TextToSpeech.OnInitListener {
         return trimmed.split(Regex("\\s+")).size
     }
 
-    override fun onInit(status: Int) {
-        if (status == TextToSpeech.SUCCESS) {
-            if (!configureTtsEngine()) {
-                Log.e(TAG, "TTS engine initialized but could not be configured")
-                showToast("TTS language/audio setup failed", Toast.LENGTH_LONG)
-                return
-            }
-
-            isTtsInitialized = true
-            Log.d(TAG, "TTS initialized successfully")
-
-            val pendingText = pendingSpeechText
-            if (pendingText != null) {
-                pendingSpeechText = null
-                Log.d(TAG, "Speaking pending text: $pendingText")
-                if (!speakPreparedText(pendingText)) {
-                    resetTtsAndQueue(pendingText)
-                }
-            }
-        } else {
-            Log.e(TAG, "TTS Initialization failed")
-            showToast("TTS initialization failed", Toast.LENGTH_LONG)
-        }
-    }
-
-    private fun initializeTts() {
-        isTtsInitialized = false
-        tts = TextToSpeech(this, this, GOOGLE_TTS_ENGINE)
-    }
-
-    private fun configureTtsEngine(): Boolean {
-        val engine = tts ?: return false
-        val languageResult = engine.setLanguage(Locale.getDefault())
-        Log.d(TAG, "TTS setLanguage(${Locale.getDefault()}) result=$languageResult")
-        if (languageResult == TextToSpeech.LANG_MISSING_DATA || languageResult == TextToSpeech.LANG_NOT_SUPPORTED) {
-            Log.w(TAG, "Default TTS language unsupported; falling back to US English")
-            val fallbackResult = engine.setLanguage(Locale.US)
-            Log.d(TAG, "TTS setLanguage(${Locale.US}) fallback result=$fallbackResult")
-            if (fallbackResult == TextToSpeech.LANG_MISSING_DATA || fallbackResult == TextToSpeech.LANG_NOT_SUPPORTED) {
-                Log.e(TAG, "US English TTS language unavailable")
-                showToast("TTS voice data missing; open app and use Test Phone Speech.", Toast.LENGTH_LONG)
-                return false
-            }
-        }
-
-        engine.setAudioAttributes(
-            AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_MEDIA)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                .build()
-        )
-        engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(utteranceId: String?) {
-                Log.d(TAG, "TTS started: $utteranceId")
-            }
-
-            override fun onDone(utteranceId: String?) {
-                Log.d(TAG, "TTS finished: $utteranceId")
-                abandonSpeechAudioFocus()
-            }
-
-            @Deprecated("Deprecated in Java")
-            override fun onError(utteranceId: String?) {
-                Log.e(TAG, "TTS playback error: $utteranceId")
-                abandonSpeechAudioFocus()
-            }
-
-            override fun onError(utteranceId: String?, errorCode: Int) {
-                Log.e(TAG, "TTS playback error: $utteranceId, code=$errorCode")
-                abandonSpeechAudioFocus()
-                showToast("TTS playback failed: $errorCode", Toast.LENGTH_LONG)
-            }
-        })
-        return true
-    }
-
     private fun sanitizeTextForSpeech(text: String): String {
         var clean = text
 
@@ -1080,45 +1758,196 @@ class FloatingButtonService : Service(), TextToSpeech.OnInitListener {
         return clean
     }
 
-    private fun speakText(text: String) {
+    private fun speakText(text: String, startCharOffset: Int = 0) {
         serviceScope.launch(Dispatchers.Main) {
             val cleanText = sanitizeTextForSpeech(text)
             if (cleanText.isBlank()) {
                 Log.d(TAG, "Speech text is empty after sanitization")
                 return@launch
             }
-
-            if (tts == null) {
-                Log.d(TAG, "TTS is null, initializing on-demand and queueing text...")
-                pendingSpeechText = cleanText
-                initializeTts()
+            val safeOffset = startCharOffset.coerceIn(0, cleanText.length)
+            var playbackOffset = safeOffset
+            while (playbackOffset < cleanText.length && cleanText[playbackOffset].isWhitespace()) {
+                playbackOffset += 1
+            }
+            val playbackText = cleanText.substring(playbackOffset)
+            if (playbackText.isBlank()) {
+                Log.d(TAG, "Speech text is empty after applying offset=$playbackOffset")
                 return@launch
             }
 
-            if (!isTtsInitialized) {
-                Log.d(TAG, "TTS is initializing, queueing text...")
-                pendingSpeechText = cleanText
-                return@launch
+            Log.d(TAG, "Speaking clean text from offset=$playbackOffset: $playbackText")
+            currentSpokenText = cleanText
+            currentSpeechStartCharOffset = playbackOffset
+            currentSpeechCharIndex = playbackOffset
+            currentSpeechDurationMs = 0L
+            synchronized(speechProgressPoints) {
+                speechProgressPoints.clear()
+                speechProgressPoints.add(SpeechProgressPoint(0L, playbackOffset))
             }
+            requestSpeechAudioFocus()
+            prepareSpeechAudioRoute()
+            when (SpeechEnginePreferences.getSelectedEngine(this@FloatingButtonService)) {
+                SpeechEnginePreferences.SpeechEngine.PIPER -> {
+                    val voice = SherpaTtsPreferences.getSelectedVoice(this@FloatingButtonService)
+                    val speed = SherpaTtsPreferences.getVoiceSpeed(this@FloatingButtonService)
+                    sherpaSpeechController.speak(playbackText, voice, speed, object : SherpaSpeechController.Listener {
+                        override fun onStart(totalDurationMs: Long) {
+                            handleSpeechPlaybackStart(totalDurationMs)
+                        }
 
-            Log.d(TAG, "Speaking clean text: $cleanText")
-            if (!speakPreparedText(cleanText)) {
-                resetTtsAndQueue(cleanText)
+                        override fun onProgress(positionMs: Long, totalDurationMs: Long, spokenCharIndex: Int) {
+                            handleSpeechPlaybackProgress(positionMs, totalDurationMs, spokenCharIndex)
+                        }
+
+                        override fun onComplete() {
+                            handleSpeechPlaybackComplete()
+                        }
+
+                        override fun onError(message: String, throwable: Throwable?) {
+                            handleSpeechPlaybackError(message, throwable)
+                        }
+                    })
+                }
+                SpeechEnginePreferences.SpeechEngine.GOOGLE -> {
+                    val speed = SherpaTtsPreferences.getVoiceSpeed(this@FloatingButtonService)
+                    googleTtsController.speak(playbackText, speed, object : GoogleTtsController.Listener {
+                        override fun onStart() {
+                            handleSpeechPlaybackStart(0L)
+                        }
+
+                        override fun onProgress(spokenCharIndex: Int) {
+                            val absoluteCharIndex = (currentSpeechStartCharOffset + spokenCharIndex)
+                                .coerceIn(0, currentSpokenText?.length ?: 0)
+                            currentSpeechCharIndex = absoluteCharIndex
+                            synchronized(speechProgressPoints) {
+                                val elapsedMs = (SystemClock.elapsedRealtime() - currentSpeechStartMs).coerceAtLeast(0L)
+                                val previous = speechProgressPoints.lastOrNull()
+                                if (previous == null || previous.charIndex != absoluteCharIndex) {
+                                    speechProgressPoints.add(SpeechProgressPoint(elapsedMs, absoluteCharIndex))
+                                }
+                            }
+                        }
+
+                        override fun onComplete() {
+                            handleSpeechPlaybackComplete()
+                        }
+
+                        override fun onError(message: String, throwable: Throwable?) {
+                            handleSpeechPlaybackError(message, throwable)
+                        }
+                    })
+                }
             }
         }
     }
 
-    private fun speakPreparedText(cleanText: String): Boolean {
-        requestSpeechAudioFocus()
-        prepareSpeechAudioRoute()
-        playSpeechRouteProbeTone()
-        val speakResult = tts?.speak(cleanText, TextToSpeech.QUEUE_FLUSH, null, TTS_UTTERANCE_ID)
-        if (speakResult == TextToSpeech.SUCCESS) {
-            return true
+    private fun stopSpeaking() {
+        serviceScope.launch(Dispatchers.Main) {
+            isTtsSpeaking.set(false)
+            sherpaSpeechController.stop()
+            googleTtsController.stop()
+            abandonSpeechAudioFocus()
+            startLocalCommandListening()
         }
-        Log.e(TAG, "tts.speak failed with result=$speakResult")
+    }
+
+    private fun rewindCurrentSpeech() {
+        serviceScope.launch(Dispatchers.Main) {
+            val spokenText = currentSpokenText
+            if (spokenText.isNullOrBlank()) {
+                showToast("Nothing to rewind", Toast.LENGTH_SHORT)
+                return@launch
+            }
+            val restartIndex = computeSpeechRewindIndex(spokenText)
+            if (spokenText.substring(restartIndex).isBlank()) {
+                showToast("Nothing to rewind", Toast.LENGTH_SHORT)
+                return@launch
+            }
+            sherpaSpeechController.stop()
+            googleTtsController.stop()
+            isTtsSpeaking.set(false)
+            speakText(spokenText, restartIndex)
+            showToast("Rewound speech by 10 seconds", Toast.LENGTH_SHORT)
+        }
+    }
+
+    private fun handleSpeechPlaybackStart(totalDurationMs: Long) {
+        isTtsSpeaking.set(true)
+        currentSpeechStartMs = SystemClock.elapsedRealtime()
+        currentSpeechDurationMs = totalDurationMs
+        pendingVoiceRequestTiming?.let { timing ->
+            timing.ttsStartMs =
+                (SystemClock.elapsedRealtime() - timing.recordingStopStartedMs).coerceAtLeast(0L)
+            logVoiceRequestTiming("tts-start", timing)
+            pendingVoiceRequestTiming = null
+        }
+        mainHandler.post { startLocalCommandListening() }
+    }
+
+    private fun handleSpeechPlaybackProgress(positionMs: Long, totalDurationMs: Long, spokenCharIndex: Int) {
+        currentSpeechDurationMs = totalDurationMs
+        val absoluteCharIndex = (currentSpeechStartCharOffset + spokenCharIndex)
+            .coerceIn(0, currentSpokenText?.length ?: 0)
+        currentSpeechCharIndex = absoluteCharIndex
+        synchronized(speechProgressPoints) {
+            val previous = speechProgressPoints.lastOrNull()
+            if (previous == null || previous.charIndex != absoluteCharIndex) {
+                speechProgressPoints.add(SpeechProgressPoint(positionMs, absoluteCharIndex))
+            }
+        }
+    }
+
+    private fun handleSpeechPlaybackComplete() {
+        isTtsSpeaking.set(false)
+        currentSpeechCharIndex = currentSpokenText?.length ?: 0
         abandonSpeechAudioFocus()
-        return false
+        mainHandler.post { startLocalCommandListening() }
+    }
+
+    private fun handleSpeechPlaybackError(message: String, throwable: Throwable?) {
+        Log.e(TAG, message, throwable)
+        isTtsSpeaking.set(false)
+        pendingVoiceRequestTiming = null
+        abandonSpeechAudioFocus()
+        mainHandler.post { startLocalCommandListening() }
+        showToast(message, Toast.LENGTH_LONG)
+    }
+
+    private fun executeLocalBridgeCommand(command: LocalBridgeCommand, statusText: String) {
+        serviceScope.launch {
+            withContext(Dispatchers.Main) {
+                showToast(statusText, Toast.LENGTH_SHORT)
+            }
+            val result = sendLocalBridgeCommand(command)
+            withContext(Dispatchers.Main) {
+                handleVoiceBridgeResult(result)
+            }
+        }
+    }
+
+    private fun handleVoiceBridgeResult(result: VoiceBridgeResult) {
+        when (result.action) {
+            "repeat_last_response" -> {
+                val previous = lastAssistantResponse
+                if (previous.isNullOrBlank()) {
+                    speakText("There is no previous assistant response to repeat.")
+                } else {
+                    speakText(previous)
+                }
+            }
+            "stop_speaking" -> {
+                stopSpeaking()
+                showToast("Speech stopped", Toast.LENGTH_SHORT)
+            }
+            "rewind_speaking" -> {
+                rewindCurrentSpeech()
+            }
+            else -> {
+                lastAssistantResponse = result.response
+                speakText(result.response)
+            }
+        }
     }
 
     private fun requestSpeechAudioFocus() {
@@ -1233,58 +2062,237 @@ class FloatingButtonService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
-    private fun playSpeechRouteProbeTone() {
-        try {
-            val tone = ToneGenerator(AudioManager.STREAM_MUSIC, 80)
-            tone.startTone(ToneGenerator.TONE_PROP_BEEP, 150)
-            mainHandler.postDelayed({ tone.release() }, 300)
-        } catch (e: Exception) {
-            Log.w(TAG, "Speech route probe tone failed", e)
-        }
-    }
+    private fun voiceBridgeBaseUrl(): String = VoiceBridgePreferences.getBaseUrl(this)
 
-    private fun resetTtsAndQueue(cleanText: String) {
-        Log.e(TAG, "Resetting TTS and queueing response")
-        pendingSpeechText = cleanText
-        isTtsInitialized = false
-        try {
-            tts?.stop()
-            tts?.shutdown()
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to shut down previous TTS instance", e)
-        }
-        initializeTts()
-    }
-
-    private suspend fun sendToVoiceBridge(audioFile: File): String {
+    private suspend fun sendToVoiceBridge(
+        audioFile: File,
+        recordingStopStartedMs: Long,
+        audioSampleCount: Int,
+        flacEncodeMs: Long
+    ): VoiceBridgeResult {
         return withContext(Dispatchers.IO) {
+            val timing = VoiceRequestTiming(
+                recordingStopStartedMs = recordingStopStartedMs,
+                audioSamples = audioSampleCount,
+                flacBytes = audioFile.length(),
+                flacEncodeMs = flacEncodeMs
+            )
+            val baseUrl = voiceBridgeBaseUrl()
+            val requestBody = audioFile.asRequestBody("application/octet-stream".toMediaType())
+            val request = Request.Builder()
+                .url("$baseUrl/voice-command")
+                .post(requestBody)
+                .build()
             try {
-                val requestBody = audioFile.asRequestBody("application/octet-stream".toMediaType())
-                val request = Request.Builder()
-                    .url("http://192.168.50.51:9090/voice-command")
-                    .post(requestBody)
-                    .build()
-
-                val response = httpClient.newCall(request).execute()
-                val bodyText = response.body?.string().orEmpty()
-                Log.d(TAG, "Voice Bridge response: $bodyText")
-                if (response.isSuccessful) {
-                    // Since the standalone voice_bridge.js returns JSON now (e.g. {"transcription": "...", "response": "..."})
-                    // let's parse the JSON to get the text response to speak!
-                    try {
-                        val json = JSONObject(bodyText)
-                        json.optString("response", bodyText)
-                    } catch (e: Exception) {
-                        bodyText
-                    }
-                } else {
-                    "Error: ${response.code} ${response.message}"
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to connect to Voice Bridge", e)
-                "Error connecting to PC server: ${e.message}"
+                val ack = sendToVoiceBridgeForAck(request, timing)
+                val result = waitForVoiceBridgeResultStream(ack.requestId, timing)
+                timing.serverTimings = result.serverTimings
+                pendingVoiceRequestTiming = timing
+                logVoiceRequestTiming("success", timing)
+                result
+            } catch (error: Exception) {
+                timing.responseReceivedMs =
+                    (SystemClock.elapsedRealtime() - recordingStopStartedMs).coerceAtLeast(0L)
+                logVoiceRequestTiming("failed:${error.javaClass.simpleName}", timing)
+                throw error
             }
         }
+    }
+
+    private suspend fun sendLocalBridgeCommand(command: LocalBridgeCommand): VoiceBridgeResult {
+        return withContext(Dispatchers.IO) {
+            try {
+                val json = JSONObject().apply {
+                    put("action", command.action)
+                    command.chatNumber?.let { put("chat_number", it) }
+                    command.direction?.let { put("direction", it) }
+                }
+                val baseUrl = voiceBridgeBaseUrl()
+                val requestBody = RequestBody.create("application/json".toMediaType(), json.toString())
+                val request = Request.Builder()
+                    .url("$baseUrl/local-command")
+                    .post(requestBody)
+                    .build()
+                val response = httpClient.newCall(request).execute()
+                val bodyText = response.body?.string().orEmpty()
+                Log.d(TAG, "Local bridge command response: code=${response.code}, body=$bodyText")
+                if (!response.isSuccessful) {
+                    throw IOException("Local command failed: ${response.code} ${response.message}")
+                }
+                val resultJson = JSONObject(bodyText)
+                VoiceBridgeResult(
+                    transcription = resultJson.optString("transcription", ""),
+                    response = resultJson.optString("response", bodyText),
+                    action = resultJson.optString("action", "speak_response")
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed local bridge command", e)
+                VoiceBridgeResult(
+                    transcription = "",
+                    response = "Error running local command: ${e.message}",
+                    action = "speak_response",
+                    serverTimings = null
+                )
+            }
+        }
+    }
+
+    private fun sendToVoiceBridgeForAck(request: Request, timing: VoiceRequestTiming): VoiceBridgeAck {
+        val ackClient = httpClient.newBuilder()
+            .connectTimeout(VOICE_BRIDGE_ACK_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .writeTimeout(VOICE_BRIDGE_ACK_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .readTimeout(VOICE_BRIDGE_ACK_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .build()
+        val ackStartedAt = SystemClock.elapsedRealtime()
+        val response = ackClient.newCall(request).execute()
+        val bodyText = response.body?.string().orEmpty()
+        timing.uploadAckMs = (SystemClock.elapsedRealtime() - ackStartedAt).coerceAtLeast(0L)
+        Log.d(TAG, "Voice Bridge ACK response: code=${response.code}, body=$bodyText")
+        if (response.code != 202) {
+            throw IOException("Voice Bridge did not acknowledge upload: ${response.code} ${response.message}")
+        }
+        val json = JSONObject(bodyText)
+        val requestId = json.optString("request_id", "").trim()
+        if (requestId.isBlank()) {
+            throw IOException("Voice Bridge ACK missing request id")
+        }
+        timing.requestId = requestId
+        return VoiceBridgeAck(requestId)
+    }
+
+    private fun waitForVoiceBridgeResultStream(
+        requestId: String,
+        timing: VoiceRequestTiming
+    ): VoiceBridgeResult {
+        val streamClient = httpClient.newBuilder()
+            .readTimeout(VOICE_BRIDGE_RESULT_MAX_WAIT_MS, TimeUnit.MILLISECONDS)
+            .build()
+        val baseUrl = voiceBridgeBaseUrl()
+        val request = Request.Builder()
+            .url("$baseUrl/voice-command-events/$requestId")
+            .get()
+            .build()
+        val waitStartedAt = SystemClock.elapsedRealtime()
+        streamClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                throw IOException("Voice Bridge event stream failed: ${response.code} ${response.message}")
+            }
+            val source = response.body?.source()
+                ?: throw IOException("Voice Bridge event stream returned an empty body")
+            var currentEvent = "message"
+            val dataLines = mutableListOf<String>()
+            while (!source.exhausted()) {
+                val line = source.readUtf8Line() ?: break
+                if (line.isEmpty()) {
+                    if (dataLines.isNotEmpty()) {
+                        val eventData = dataLines.joinToString("\n")
+                        Log.d(TAG, "Voice Bridge SSE event=$currentEvent data=$eventData")
+                        when (currentEvent) {
+                            "result" -> {
+                                timing.serverPushWaitMs =
+                                    (SystemClock.elapsedRealtime() - waitStartedAt).coerceAtLeast(0L)
+                                timing.responseReceivedMs =
+                                    (SystemClock.elapsedRealtime() - timing.recordingStopStartedMs).coerceAtLeast(0L)
+                                return parseVoiceBridgeResult(eventData)
+                            }
+                            "error" -> {
+                                val json = JSONObject(eventData)
+                                timing.serverPushWaitMs =
+                                    (SystemClock.elapsedRealtime() - waitStartedAt).coerceAtLeast(0L)
+                                timing.responseReceivedMs =
+                                    (SystemClock.elapsedRealtime() - timing.recordingStopStartedMs).coerceAtLeast(0L)
+                                timing.serverTimings =
+                                    parseServerTimingBreakdown(json.optJSONObject("timings"))
+                                throw IOException(json.optString("error", "Voice Bridge processing failed"))
+                            }
+                        }
+                        dataLines.clear()
+                        currentEvent = "message"
+                    }
+                    continue
+                }
+                if (line.startsWith(":")) {
+                    continue
+                }
+                if (line.startsWith("event:")) {
+                    currentEvent = line.substringAfter("event:").trim()
+                    continue
+                }
+                if (line.startsWith("data:")) {
+                    dataLines.add(line.substringAfter("data:").trim())
+                }
+            }
+        }
+        throw IOException("Voice Bridge event stream closed before sending a result")
+    }
+
+    private fun parseVoiceBridgeResult(bodyText: String): VoiceBridgeResult {
+        val json = JSONObject(bodyText)
+        return VoiceBridgeResult(
+            transcription = json.optString("transcription", ""),
+            response = json.optString("response", bodyText),
+            action = json.optString("action", "speak_response"),
+            serverTimings = parseServerTimingBreakdown(json.optJSONObject("timings"))
+        )
+    }
+
+    private fun parseServerTimingBreakdown(json: JSONObject?): ServerTimingBreakdown? {
+        if (json == null) {
+            return null
+        }
+        return ServerTimingBreakdown(
+            bridgeUploadBodyReadMs = json.optLongOrNull("bridge_upload_body_read_ms"),
+            whisperRequestMs = json.optLongOrNull("whisper_request_ms"),
+            uploadBodyReadMs = json.optLongOrNull("upload_body_read_ms"),
+            tempWriteMs = json.optLongOrNull("temp_write_ms"),
+            transcribeMs =
+                json.optLongOrNull("server_transcribe_ms") ?: json.optLongOrNull("transcribe_ms"),
+            postprocessMs = json.optLongOrNull("postprocess_ms"),
+            serverTotalMs = json.optLongOrNull("server_total_ms"),
+            aiMs = json.optLongOrNull("ai_ms"),
+            totalProcessMs = json.optLongOrNull("total_process_ms")
+        )
+    }
+
+    private fun JSONObject.optLongOrNull(key: String): Long? {
+        if (!has(key) || isNull(key)) {
+            return null
+        }
+        return optLong(key)
+    }
+
+    private fun logVoiceRequestTiming(stage: String, timing: VoiceRequestTiming) {
+        val clipSeconds =
+            if (timing.audioSamples > 0) timing.audioSamples.toDouble() / AUDIO_SAMPLE_RATE.toDouble() else 0.0
+        val server = timing.serverTimings
+        val networkResponseOverheadMs =
+            if ((server?.whisperRequestMs ?: -1L) >= 0L && (server?.serverTotalMs ?: -1L) >= 0L) {
+                (server!!.whisperRequestMs!! - server.serverTotalMs!!).coerceAtLeast(0L)
+            } else {
+                -1L
+            }
+        val timingMessage =
+            "Voice timing [$stage] requestId=${timing.requestId} " +
+                "clip_s=${"%.2f".format(Locale.US, clipSeconds)} " +
+                "tail_extract_ms=-1 " +
+                "flac_bytes=${timing.flacBytes} " +
+                "flac_encode_ms=${timing.flacEncodeMs} " +
+                "upload_ack_ms=${timing.uploadAckMs} " +
+                "bridge_upload_body_read_ms=${server?.bridgeUploadBodyReadMs ?: -1} " +
+                "server_push_wait_ms=${timing.serverPushWaitMs} " +
+                "response_received_ms=${timing.responseReceivedMs} " +
+                "tts_start_ms=${timing.ttsStartMs ?: -1} " +
+                "whisper_round_trip_ms=${server?.whisperRequestMs ?: -1} " +
+                "upload_body_read_ms=${server?.uploadBodyReadMs ?: -1} " +
+                "server_temp_write_ms=${server?.tempWriteMs ?: -1} " +
+                "server_transcribe_ms=${server?.transcribeMs ?: -1} " +
+                "server_postprocess_ms=${server?.postprocessMs ?: -1} " +
+                "server_total_ms=${server?.serverTotalMs ?: -1} " +
+                "network_response_overhead_ms=$networkResponseOverheadMs " +
+                "server_ai_ms=${server?.aiMs ?: -1} " +
+                "server_total_process_ms=${server?.totalProcessMs ?: -1}"
+        Log.d(TAG, timingMessage)
+        DebugTimingStore.saveLastTiming(this, timingMessage)
     }
 
     override fun onDestroy() {
@@ -1292,10 +2300,22 @@ class FloatingButtonService : Service(), TextToSpeech.OnInitListener {
         Log.d(TAG, "Service onDestroy called")
         usageRetryJob?.cancel()
         usageRetryJob = null
+        isTtsSpeaking.set(false)
+
+        mainHandler.removeCallbacks(restartLocalCommandRunnable)
+        stopLocalCommandListening()
+        voskLocalCommandRecognizer?.shutdown()
+        voskLocalCommandRecognizer = null
+        try {
+            localCommandRecognizer?.destroy()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to destroy local command recognizer", e)
+        }
+        localCommandRecognizer = null
 
         abandonSpeechAudioFocus()
-        tts?.stop()
-        tts?.shutdown()
+        sherpaSpeechController.release()
+        googleTtsController.release()
 
         try {
             if (::floatingView.isInitialized) {
@@ -1321,6 +2341,36 @@ class FloatingButtonService : Service(), TextToSpeech.OnInitListener {
         audioRecorder.cleanup()
 
         Log.d(TAG, "Service cleanup completed")
+    }
+
+    private fun preloadSelectedSpeechEngine() {
+        when (SpeechEnginePreferences.getSelectedEngine(this)) {
+            SpeechEnginePreferences.SpeechEngine.PIPER -> {
+                serviceScope.launch {
+                    runCatching {
+                        sherpaTtsEngine.preload(
+                            SherpaTtsPreferences.getSelectedVoice(this@FloatingButtonService),
+                            SherpaTtsPreferences.getVoiceSpeed(this@FloatingButtonService)
+                        )
+                    }.onFailure { error ->
+                        Log.w(TAG, "Sherpa preload failed in service", error)
+                    }
+                }
+            }
+            SpeechEnginePreferences.SpeechEngine.GOOGLE -> {
+                googleTtsController.warmUp { result ->
+                    result.onSuccess {
+                        googleTtsController.applySavedVoice { applyResult ->
+                            applyResult.onFailure { error ->
+                                Log.w(TAG, "Google TTS applySavedVoice failed in service", error)
+                            }
+                        }
+                    }.onFailure { error ->
+                        Log.w(TAG, "Google TTS warmup failed in service", error)
+                    }
+                }
+            }
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

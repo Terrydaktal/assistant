@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "english-variant-converter",
     "fastapi>=0.137.1",
     "faster-whisper>=1.2.1",
     "nvidia-cublas-cu12>=12.9.2.10",
@@ -12,3 +13,11 @@ dependencies = [
     "python-multipart>=0.0.32",
     "uvicorn>=0.49.0",
 ]
+
+[project.optional-dependencies]
+canary = [
+    "nemo-toolkit[asr]",
+]
+
+[tool.uv.sources]
+english-variant-converter = { git = "https://github.com/TrelisResearch/whisper-english-variant-converter.git" }

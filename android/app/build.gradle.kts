@@ -28,6 +28,9 @@ android {
         versionCode = 1
         versionName = "1.0"
         multiDexEnabled = true
+        ndk {
+            abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86_64", "x86")
+        }
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -104,6 +107,10 @@ dependencies {
 
     // Audio recording
     implementation("androidx.media:media:1.6.0")
+    implementation("net.java.dev.jna:jna:5.18.1@aar")
+    implementation("com.alphacephei:vosk-android:0.3.75@aar")
+    implementation("com.alphacephei:vosk-model-en:0.3.38@aar")
+    implementation(files("libs/sherpa-onnx-1.13.3.aar"))
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
