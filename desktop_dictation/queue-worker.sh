@@ -17,6 +17,7 @@ while true; do
     ((${#recordings[@]} > 0)) || exit 0
 
     recording="${recordings[0]}"
+    metadata="${recording%.wav}.json"
     if [[ -f "$runtime_root/current-audio-path" ]] &&
         [[ "$(<"$runtime_root/current-audio-path")" == "$recording" ]]; then
         exit 0
@@ -24,7 +25,7 @@ while true; do
 
     if UV_CACHE_DIR="${UV_CACHE_DIR:-/data/.cache/uv}" \
         uv run --project "$script_dir/.." python "$script_dir/transcribe-and-type.py" "$recording"; then
-        /usr/bin/rm -f "$recording"
+        /usr/bin/rm -f -- "$recording" "$metadata"
     else
         printf '%s - Queue paused after failed transcription; preserved %s\n' \
             "$(date '+%Y-%m-%d %H:%M:%S.%3N')" "$recording" >&2

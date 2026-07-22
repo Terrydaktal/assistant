@@ -666,7 +666,6 @@ async function processVoiceCommandAudio(audioBuffer, initialTimings = {}) {
     bridge_upload_body_read_ms: initialTimings.bridge_upload_body_read_ms ?? -1,
     whisper_request_ms: -1,
     upload_body_read_ms: -1,
-    temp_write_ms: -1,
     server_transcribe_ms: -1,
     postprocess_ms: -1,
     server_total_ms: -1,

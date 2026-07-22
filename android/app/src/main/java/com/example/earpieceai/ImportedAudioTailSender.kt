@@ -36,7 +36,6 @@ object ImportedAudioTailSender {
 
     private data class WhisperServerTimings(
         val uploadBodyReadMs: Long = -1,
-        val tempWriteMs: Long = -1,
         val serverTranscribeMs: Long = -1,
         val postprocessMs: Long = -1,
         val serverTotalMs: Long = -1
@@ -458,7 +457,6 @@ object ImportedAudioTailSender {
         if (json == null) return WhisperServerTimings()
         return WhisperServerTimings(
             uploadBodyReadMs = json.optLong("upload_body_read_ms", -1),
-            tempWriteMs = json.optLong("temp_write_ms", -1),
             serverTranscribeMs = json.optLong("server_transcribe_ms", -1),
             postprocessMs = json.optLong("postprocess_ms", -1),
             serverTotalMs = json.optLong("server_total_ms", -1)
@@ -496,7 +494,6 @@ object ImportedAudioTailSender {
             append("flac_bytes=$flacBytes ")
             append("flac_encode_ms=$flacEncodeMs ")
             append("upload_body_read_ms=${serverTimings.uploadBodyReadMs} ")
-            append("server_temp_write_ms=${serverTimings.tempWriteMs} ")
             append("server_transcribe_ms=${serverTimings.serverTranscribeMs} ")
             append("server_postprocess_ms=${serverTimings.postprocessMs} ")
             append("server_total_ms=${serverTimings.serverTotalMs} ")

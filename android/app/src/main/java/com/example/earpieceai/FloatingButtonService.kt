@@ -161,7 +161,6 @@ class FloatingButtonService : Service() {
         val bridgeUploadBodyReadMs: Long? = null,
         val whisperRequestMs: Long? = null,
         val uploadBodyReadMs: Long? = null,
-        val tempWriteMs: Long? = null,
         val transcribeMs: Long? = null,
         val postprocessMs: Long? = null,
         val serverTotalMs: Long? = null,
@@ -2244,7 +2243,6 @@ class FloatingButtonService : Service() {
             bridgeUploadBodyReadMs = json.optLongOrNull("bridge_upload_body_read_ms"),
             whisperRequestMs = json.optLongOrNull("whisper_request_ms"),
             uploadBodyReadMs = json.optLongOrNull("upload_body_read_ms"),
-            tempWriteMs = json.optLongOrNull("temp_write_ms"),
             transcribeMs =
                 json.optLongOrNull("server_transcribe_ms") ?: json.optLongOrNull("transcribe_ms"),
             postprocessMs = json.optLongOrNull("postprocess_ms"),
@@ -2284,7 +2282,6 @@ class FloatingButtonService : Service() {
                 "tts_start_ms=${timing.ttsStartMs ?: -1} " +
                 "whisper_round_trip_ms=${server?.whisperRequestMs ?: -1} " +
                 "upload_body_read_ms=${server?.uploadBodyReadMs ?: -1} " +
-                "server_temp_write_ms=${server?.tempWriteMs ?: -1} " +
                 "server_transcribe_ms=${server?.transcribeMs ?: -1} " +
                 "server_postprocess_ms=${server?.postprocessMs ?: -1} " +
                 "server_total_ms=${server?.serverTotalMs ?: -1} " +

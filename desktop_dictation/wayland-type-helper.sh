@@ -43,4 +43,37 @@ fi
 ydotool key --key-delay 0 110:0 42:0 54:0 29:0 97:0 56:0 100:0 125:0 126:0 47:0 \
     >/dev/null 2>&1 || true
 sleep 0.05
-ydotool type --key-delay 0 --key-hold 0 --file=-
+
+type_pid=""
+
+watch_for_modifier() {
+    while kill -0 "$type_pid" 2>/dev/null; do
+        if modifier_held; then
+            printf 'wayland-type-helper: refusing to continue typing because a modifier key was pressed during typing\n' >&2
+            kill -TERM "$type_pid" 2>/dev/null || true
+            return 5
+        fi
+        sleep 0.01
+    done
+    return 0
+}
+
+ydotool type --key-delay 0 --key-hold 0 --file=- <&0 &
+type_pid=$!
+watch_pid=""
+watch_for_modifier &
+watch_pid=$!
+
+type_status=0
+wait "$type_pid" || type_status=$?
+
+if kill -0 "$watch_pid" 2>/dev/null; then
+    kill -TERM "$watch_pid" 2>/dev/null || true
+fi
+watch_status=0
+wait "$watch_pid" || watch_status=$?
+
+if ((watch_status == 5)); then
+    exit 5
+fi
+exit "$type_status"
