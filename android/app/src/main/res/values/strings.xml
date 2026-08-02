@@ -1,4 +1,4 @@
 <resources>
-    <string name="app_name">Earpiece AI</string>
+    <string name="app_name">Assistant</string>
     <string name="accessibility_service_description">Enables auto-paste of transcribed text into any text field</string>
 </resources>

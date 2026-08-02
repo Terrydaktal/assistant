@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Swiftsay" parent="Theme.MaterialComponents.NoActionBar">
+        <item name="colorPrimary">@color/swiftsay_primary</item>
+        <item name="colorPrimaryVariant">@color/swiftsay_primary_variant</item>
+        <item name="colorSecondary">@color/swiftsay_secondary</item>
+        <item name="colorSecondaryVariant">@color/swiftsay_secondary_variant</item>
+        <item name="colorOnPrimary">@color/swiftsay_on_primary</item>
+        <item name="colorOnSecondary">@color/swiftsay_on_secondary</item>
+        <item name="colorSurface">@color/swiftsay_surface</item>
+        <item name="colorOnSurface">@color/swiftsay_on_surface</item>
+        <item name="android:colorBackground">@color/swiftsay_background</item>
+        <item name="colorOnBackground">@color/swiftsay_on_background</item>
+        <item name="colorError">@color/swiftsay_error</item>
+        <item name="colorOnError">@color/swiftsay_on_error</item>
+
+        <item name="android:windowBackground">@color/swiftsay_background</item>
+        <item name="android:statusBarColor">@color/swiftsay_background</item>
+        <item name="android:navigationBarColor">@color/swiftsay_background</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+</resources>

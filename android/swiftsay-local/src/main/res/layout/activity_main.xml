@@ -1,0 +1,194 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/swiftsay_gradient_background"
+    android:fillViewport="true"
+    android:fitsSystemWindows="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp"
+        android:gravity="center_horizontal">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="SwiftSay Local"
+            android:textSize="24sp"
+            android:textStyle="bold"
+            android:textColor="@color/swiftsay_on_background"
+            android:layout_marginBottom="8dp" />
+
+        <TextView
+            android:id="@+id/server_value"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Whisper server: 192.168.50.51:5001"
+            android:textColor="@color/swiftsay_on_background"
+            android:layout_marginBottom="24dp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp"
+            android:background="@drawable/swiftsay_card_background"
+            android:layout_marginBottom="12dp">
+
+            <TextView
+                android:id="@+id/step1_title"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Step 1: Allow Restricted Settings"
+                android:textStyle="bold"
+                android:textSize="16sp"
+                android:textColor="@color/swiftsay_on_surface" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="On Android 13+, allow restricted settings if Android blocks Accessibility setup."
+                android:textSize="14sp"
+                android:textColor="@color/swiftsay_on_surface"
+                android:layout_marginTop="4dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_step1"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Open App Info"
+                style="@style/Widget.Swiftsay.Button.Secondary"
+                android:layout_marginTop="8dp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp"
+            android:background="@drawable/swiftsay_card_background"
+            android:layout_marginBottom="12dp">
+
+            <TextView
+                android:id="@+id/step2_title"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Step 2: Enable SwiftSay Local Service"
+                android:textStyle="bold"
+                android:textSize="16sp"
+                android:textColor="@color/swiftsay_on_surface" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Enable SwiftSay Local Text Paster in Accessibility settings."
+                android:textSize="14sp"
+                android:textColor="@color/swiftsay_on_surface"
+                android:layout_marginTop="4dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/enable_accessibility_button"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Enable Accessibility"
+                style="@style/Widget.Swiftsay.Button.Secondary"
+                android:layout_marginTop="8dp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp"
+            android:background="@drawable/swiftsay_card_background"
+            android:layout_marginBottom="12dp">
+
+            <TextView
+                android:id="@+id/step3_title"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Step 3: Display Over Other Apps"
+                android:textStyle="bold"
+                android:textSize="16sp"
+                android:textColor="@color/swiftsay_on_surface" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Allow overlay permission to show the floating recording button."
+                android:textSize="14sp"
+                android:textColor="@color/swiftsay_on_surface"
+                android:layout_marginTop="4dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_overlay"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Grant Overlay Permission"
+                style="@style/Widget.Swiftsay.Button.Secondary"
+                android:layout_marginTop="8dp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp"
+            android:background="@drawable/swiftsay_card_background"
+            android:layout_marginBottom="12dp">
+
+            <TextView
+                android:id="@+id/step4_title"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Step 4: Microphone Access"
+                android:textStyle="bold"
+                android:textSize="16sp"
+                android:textColor="@color/swiftsay_on_surface" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Grant permission to record audio for local Whisper transcription."
+                android:textSize="14sp"
+                android:textColor="@color/swiftsay_on_surface"
+                android:layout_marginTop="4dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_mic"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Grant Mic Permission"
+                style="@style/Widget.Swiftsay.Button.Secondary"
+                android:layout_marginTop="8dp" />
+        </LinearLayout>
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/config_button"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Whisper Server Settings"
+            style="@style/Widget.Swiftsay.Button.Secondary"
+            android:layout_marginBottom="12dp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/start_service_button"
+            android:layout_width="match_parent"
+            android:layout_height="60dp"
+            android:text="Start SwiftSay Local"
+            android:textSize="18sp"
+            style="@style/Widget.Swiftsay.Button.Primary"
+            android:layout_marginBottom="12dp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/stop_service_button"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Stop Service"
+            style="@style/Widget.Swiftsay.Button.Secondary" />
+
+    </LinearLayout>
+</ScrollView>

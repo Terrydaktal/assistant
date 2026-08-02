@@ -16,7 +16,7 @@
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Earpiece AI Setup Guide"
+            android:text="Assistant Setup Guide"
             android:textSize="24sp"
             android:textStyle="bold"
             android:textColor="@color/earpieceai_on_background"
@@ -70,7 +70,7 @@
                 android:id="@+id/step2_title"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Step 2: Enable Earpiece AI Service"
+                android:text="Step 2: Enable Assistant Service"
                 android:textStyle="bold"
                 android:textSize="16sp"
                 android:textColor="@color/earpieceai_on_surface" />
@@ -78,7 +78,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Enable 'EarpieceAi Text Paster' in Accessibility settings for automatic pasting."
+                android:text="Enable 'Assistant Text Paster' in Accessibility settings for automatic pasting."
                 android:textSize="14sp"
                 android:textColor="@color/earpieceai_on_surface"
                 android:layout_marginTop="4dp" />
@@ -162,38 +162,6 @@
                 android:layout_marginTop="8dp" />
         </LinearLayout>
 
-        <View
-            android:layout_width="match_parent"
-            android:layout_height="1dp"
-            android:background="@color/earpieceai_surface_variant"
-            android:layout_marginTop="16dp"
-            android:layout_marginBottom="16dp" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/start_service_button"
-            android:layout_width="match_parent"
-            android:layout_height="60dp"
-            android:text="Start Earpiece AI"
-            android:textSize="18sp"
-            style="@style/Widget.EarpieceAi.Button.Primary"
-            android:layout_marginBottom="12dp" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/stop_service_button"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Stop Service"
-            style="@style/Widget.EarpieceAi.Button.Secondary"
-            android:layout_marginBottom="12dp" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/test_speech_button"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Test Phone Speech"
-            style="@style/Widget.EarpieceAi.Button.Secondary"
-            android:layout_marginBottom="12dp" />
-
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -260,6 +228,14 @@
                 android:text="Adjust voice speed"
                 style="@style/Widget.EarpieceAi.Button.Secondary"
                 android:layout_marginTop="8dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/test_speech_button"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Test Phone Speech"
+                style="@style/Widget.EarpieceAi.Button.Secondary"
+                android:layout_marginTop="8dp" />
         </LinearLayout>
 
         <LinearLayout
@@ -273,7 +249,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Imported recording tail"
+                android:text="Recording transcription"
                 android:textStyle="bold"
                 android:textSize="16sp"
                 android:textColor="@color/earpieceai_on_surface" />
@@ -281,68 +257,18 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Pick an MP3 or M4A file, transcribe the last N seconds with the Whisper service, and copy the result to the clipboard."
+                android:text="Choose a recording, send its latest section to Whisper, watch every processing stage, and copy the result from a dedicated page."
                 android:textSize="14sp"
                 android:textColor="@color/earpieceai_on_surface"
                 android:layout_marginTop="4dp" />
 
-            <TextView
-                android:id="@+id/selected_audio_value"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="No file selected"
-                android:textSize="14sp"
-                android:textColor="@color/earpieceai_on_surface"
-                android:layout_marginTop="8dp" />
-
             <com.google.android.material.button.MaterialButton
-                android:id="@+id/select_audio_button"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Choose audio recording"
-                style="@style/Widget.EarpieceAi.Button.Secondary"
-                android:layout_marginTop="8dp" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/select_latest_recording_button"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Choose latest recording"
-                style="@style/Widget.EarpieceAi.Button.Secondary"
-                android:layout_marginTop="8dp" />
-
-            <com.google.android.material.textfield.TextInputLayout
+                android:id="@+id/recording_transcription_button"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="10dp">
-
-                <com.google.android.material.textfield.TextInputEditText
-                    android:id="@+id/imported_tail_seconds_input"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:hint="Seconds from end (e.g. 30 or 120)"
-                    android:inputType="number" />
-            </com.google.android.material.textfield.TextInputLayout>
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/send_imported_audio_button"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Transcribe selected tail"
+                android:text="Open recording transcription"
                 style="@style/Widget.EarpieceAi.Button.Primary"
                 android:layout_marginTop="10dp" />
-
-            <TextView
-                android:id="@+id/imported_result_value"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
-                android:background="@color/earpieceai_surface_variant"
-                android:padding="12dp"
-                android:text="No imported audio request yet."
-                android:textColor="@color/earpieceai_on_surface"
-                android:textIsSelectable="true"
-                android:textSize="13sp" />
         </LinearLayout>
 
         <LinearLayout
@@ -430,7 +356,31 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="Log out"
-            style="@style/Widget.EarpieceAi.Button.Danger" />
+            style="@style/Widget.EarpieceAi.Button.Danger"
+            android:layout_marginBottom="12dp" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="@color/earpieceai_surface_variant"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="16dp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/start_service_button"
+            android:layout_width="match_parent"
+            android:layout_height="60dp"
+            android:text="Start Assistant"
+            android:textSize="18sp"
+            style="@style/Widget.EarpieceAi.Button.Primary"
+            android:layout_marginBottom="12dp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/stop_service_button"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Stop Service"
+            style="@style/Widget.EarpieceAi.Button.Secondary" />
 
     </LinearLayout>
 </ScrollView>

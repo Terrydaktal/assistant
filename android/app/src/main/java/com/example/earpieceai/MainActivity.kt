@@ -1,9 +1,6 @@
 package com.example.earpieceai
 
 import android.Manifest
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.ContentUris
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioManager
@@ -11,14 +8,12 @@ import android.media.ToneGenerator
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.provider.MediaStore
 import android.provider.Settings
 import android.util.Log
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
 import android.widget.Toast
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -45,16 +40,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var voiceSpeedButton: Button
     private lateinit var speechEngineButton: Button
     private lateinit var serverSettingsButton: Button
-    private lateinit var selectAudioButton: Button
-    private lateinit var selectLatestRecordingButton: Button
-    private lateinit var sendImportedAudioButton: Button
+    private lateinit var recordingTranscriptionButton: Button
     private lateinit var selectedVoiceValue: TextView
     private lateinit var selectedVoiceSpeedValue: TextView
     private lateinit var selectedEngineValue: TextView
     private lateinit var serverAddressValue: TextView
-    private lateinit var selectedAudioValue: TextView
-    private lateinit var importedTailSecondsInput: EditText
-    private lateinit var importedResultValue: TextView
     private lateinit var debugTimingValue: TextView
     
     private lateinit var btnStep1: Button
@@ -72,37 +62,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var sherpaTtsEngine: SherpaTtsEngine
     private lateinit var sherpaSpeechController: SherpaSpeechController
     private lateinit var googleTtsController: GoogleTtsController
-    private var selectedImportedAudioUri: Uri? = null
-    private val selectImportedAudioLauncher =
-        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-            if (uri == null) {
-                return@registerForActivityResult
-            }
-            try {
-                contentResolver.takePersistableUriPermission(
-                    uri,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION
-                )
-            } catch (e: SecurityException) {
-                Log.w(TAG, "Could not persist read permission for imported audio URI", e)
-            }
-            selectedImportedAudioUri = uri
-            val displayName = resolveImportedAudioDisplayName(uri)
-            ImportedAudioPreferences.saveSelectedAudio(this, uri.toString(), displayName)
-            updateImportedAudioSummary()
-        }
-    private val requestAudioLibraryPermissionLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (granted) {
-                chooseLatestRecording()
-            } else {
-                Toast.makeText(
-                    this,
-                    "Audio permission is required to find the latest recording",
-                    Toast.LENGTH_LONG
-                ).show()
-            }
-        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -123,16 +82,11 @@ class MainActivity : AppCompatActivity() {
         voiceSpeedButton = findViewById(R.id.voice_speed_button)
         speechEngineButton = findViewById(R.id.speech_engine_button)
         serverSettingsButton = findViewById(R.id.server_settings_button)
-        selectAudioButton = findViewById(R.id.select_audio_button)
-        selectLatestRecordingButton = findViewById(R.id.select_latest_recording_button)
-        sendImportedAudioButton = findViewById(R.id.send_imported_audio_button)
+        recordingTranscriptionButton = findViewById(R.id.recording_transcription_button)
         selectedVoiceValue = findViewById(R.id.selected_voice_value)
         selectedVoiceSpeedValue = findViewById(R.id.selected_voice_speed_value)
         selectedEngineValue = findViewById(R.id.selected_engine_value)
         serverAddressValue = findViewById(R.id.server_address_value)
-        selectedAudioValue = findViewById(R.id.selected_audio_value)
-        importedTailSecondsInput = findViewById(R.id.imported_tail_seconds_input)
-        importedResultValue = findViewById(R.id.imported_result_value)
         debugTimingValue = findViewById(R.id.debug_timing_value)
         
         // Hide profile and config buttons for the standalone local version
@@ -160,12 +114,11 @@ class MainActivity : AppCompatActivity() {
         voiceSettingsButton.setOnClickListener { openVoicePicker() }
         voiceSpeedButton.setOnClickListener { openVoiceSpeedDialog() }
         serverSettingsButton.setOnClickListener { openServerSettingsDialog() }
-        selectAudioButton.setOnClickListener { selectImportedAudioFile() }
-        selectLatestRecordingButton.setOnClickListener { chooseLatestRecordingWithPermission() }
-        sendImportedAudioButton.setOnClickListener { sendImportedAudioTail() }
+        recordingTranscriptionButton.setOnClickListener {
+            startActivity(Intent(this, ImportedAudioActivity::class.java))
+        }
         profileButton.setOnClickListener { openProfile() }
         configButton.setOnClickListener { handleLoginOrLogout() }
-        restoreImportedAudioState()
         preloadSelectedSpeechEngine()
         updateSelectedVoiceSummary()
         updateServerAddressSummary()
@@ -197,11 +150,11 @@ class MainActivity : AppCompatActivity() {
         
         // Step 2: Accessibility
         if (accessibilityEnabled) {
-            step2Title.text = "Step 2: Enable Earpiece AI Service ✅"
+            step2Title.text = "Step 2: Enable Assistant Service ✅"
             enableAccessibilityButton.isEnabled = false
             enableAccessibilityButton.text = "Enabled"
         } else {
-            step2Title.text = "Step 2: Enable Earpiece AI Service ❌"
+            step2Title.text = "Step 2: Enable Assistant Service ❌"
             enableAccessibilityButton.isEnabled = true
             enableAccessibilityButton.text = "Enable Accessibility"
         }
@@ -304,7 +257,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun testPhoneSpeech() {
-        val message = "Speech test from Earpiece AI."
+        val message = "Speech test from Assistant."
         Toast.makeText(this, "Testing phone speaker via media volume", Toast.LENGTH_SHORT).show()
         val audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
         audioManager.mode = AudioManager.MODE_NORMAL
@@ -535,176 +488,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateServerAddressSummary() {
         serverAddressValue.text = VoiceBridgePreferences.getDisplayValue(this)
-    }
-
-    private fun restoreImportedAudioState() {
-        selectedImportedAudioUri = ImportedAudioPreferences.getSelectedUri(this)?.let(Uri::parse)
-        importedTailSecondsInput.setText(ImportedAudioPreferences.getTailSeconds(this).toString())
-        updateImportedAudioSummary()
-    }
-
-    private fun updateImportedAudioSummary() {
-        selectedAudioValue.text = ImportedAudioPreferences.getSelectedDisplayName(this)
-    }
-
-    private fun selectImportedAudioFile() {
-        selectImportedAudioLauncher.launch(arrayOf("audio/mpeg", "audio/mp4", "audio/*"))
-    }
-
-    private fun chooseLatestRecordingWithPermission() {
-        val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            Manifest.permission.READ_MEDIA_AUDIO
-        } else {
-            Manifest.permission.READ_EXTERNAL_STORAGE
-        }
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
-            ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
-        ) {
-            chooseLatestRecording()
-        } else {
-            requestAudioLibraryPermissionLauncher.launch(permission)
-        }
-    }
-
-    private fun chooseLatestRecording() {
-        coroutineScope.launch(Dispatchers.IO) {
-            val result = runCatching { findLatestRecordingInRecordersFolder() }
-            kotlinx.coroutines.withContext(Dispatchers.Main) {
-                val latest = result.getOrElse { error ->
-                    Log.e(TAG, "Failed to find latest recording", error)
-                    Toast.makeText(
-                        this@MainActivity,
-                        "Could not search the Recorders folder: ${error.message ?: "Unknown error"}",
-                        Toast.LENGTH_LONG
-                    ).show()
-                    return@withContext
-                }
-                if (latest == null) {
-                    Toast.makeText(
-                        this@MainActivity,
-                        "No MP3 or M4A recording found in the Recorders folder",
-                        Toast.LENGTH_LONG
-                    ).show()
-                    return@withContext
-                }
-                selectedImportedAudioUri = latest.first
-                ImportedAudioPreferences.saveSelectedAudio(
-                    this@MainActivity,
-                    latest.first.toString(),
-                    latest.second
-                )
-                updateImportedAudioSummary()
-                Toast.makeText(
-                    this@MainActivity,
-                    "Selected latest recording: ${latest.second}",
-                    Toast.LENGTH_SHORT
-                ).show()
-            }
-        }
-    }
-
-    private fun findLatestRecordingInRecordersFolder(): Pair<Uri, String>? {
-        val collection = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
-        val projection = buildList {
-            add(MediaStore.Audio.Media._ID)
-            add(MediaStore.Audio.Media.DISPLAY_NAME)
-            add(MediaStore.Audio.Media.DATE_MODIFIED)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                add(MediaStore.Audio.Media.RELATIVE_PATH)
-            } else {
-                add(MediaStore.Audio.Media.DATA)
-            }
-        }.toTypedArray()
-        val pathColumn = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            MediaStore.Audio.Media.RELATIVE_PATH
-        } else {
-            MediaStore.Audio.Media.DATA
-        }
-        val selection = "$pathColumn LIKE ?"
-        val selectionArgs = arrayOf("%Recorders/%")
-        val sortOrder = "${MediaStore.Audio.Media.DATE_MODIFIED} DESC"
-
-        contentResolver.query(collection, projection, selection, selectionArgs, sortOrder)?.use { cursor ->
-            val idIndex = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
-            val nameIndex = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME)
-            while (cursor.moveToNext()) {
-                val displayName = cursor.getString(nameIndex).orEmpty()
-                if (!displayName.endsWith(".mp3", ignoreCase = true) &&
-                    !displayName.endsWith(".m4a", ignoreCase = true)
-                ) {
-                    continue
-                }
-                val uri = ContentUris.withAppendedId(collection, cursor.getLong(idIndex))
-                return uri to displayName
-            }
-        }
-        return null
-    }
-
-    private fun resolveImportedAudioDisplayName(uri: Uri): String {
-        return contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
-            ?.use { cursor ->
-                if (!cursor.moveToFirst()) {
-                    return@use null
-                }
-                val columnIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-                if (columnIndex < 0) {
-                    null
-                } else {
-                    cursor.getString(columnIndex)
-                }
-            }
-            ?: (uri.lastPathSegment ?: "Selected audio")
-    }
-
-    private fun sendImportedAudioTail() {
-        val uri = selectedImportedAudioUri
-        if (uri == null) {
-            Toast.makeText(this, "Choose an MP3 or M4A recording first", Toast.LENGTH_LONG).show()
-            return
-        }
-        val tailSeconds = importedTailSecondsInput.text.toString().trim().toIntOrNull()
-        if (tailSeconds == null || tailSeconds <= 0) {
-            Toast.makeText(this, "Enter how many seconds from the end to send", Toast.LENGTH_LONG).show()
-            return
-        }
-        ImportedAudioPreferences.saveTailSeconds(this, tailSeconds)
-        sendImportedAudioButton.isEnabled = false
-        sendImportedAudioButton.text = "Sending..."
-        importedResultValue.text = "Extracting selected recording tail..."
-
-        coroutineScope.launch {
-            try {
-                val result = ImportedAudioTailSender.sendTail(
-                    context = this@MainActivity,
-                    uri = uri,
-                    tailSeconds = tailSeconds,
-                    whisperBaseUrl = VoiceBridgePreferences.getWhisperBaseUrl(this@MainActivity)
-                )
-                val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-                clipboard.setPrimaryClip(ClipData.newPlainText("Imported audio transcription", result.transcription))
-                importedResultValue.text =
-                    "Transcription (copied to clipboard):\n${result.transcription}\n\n${result.timingSummary}"
-                AlertDialog.Builder(this@MainActivity)
-                    .setTitle("Transcription copied")
-                    .setMessage(result.transcription)
-                    .setPositiveButton("OK", null)
-                    .show()
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to send imported audio tail", e)
-                importedResultValue.text =
-                    "Error: ${e.message ?: "Unknown error"}\n\n" +
-                        DebugTimingStore.getLastTiming(this@MainActivity)
-                Toast.makeText(
-                    this@MainActivity,
-                    "Imported audio failed: ${e.message ?: "Unknown error"}",
-                    Toast.LENGTH_LONG
-                ).show()
-            } finally {
-                sendImportedAudioButton.isEnabled = true
-                sendImportedAudioButton.text = "Transcribe selected tail"
-            }
-        }
     }
 
     private fun openServerSettingsDialog() {

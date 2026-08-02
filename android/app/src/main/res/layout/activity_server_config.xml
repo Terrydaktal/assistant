@@ -11,7 +11,7 @@
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Earpiece AI Settings"
+        android:text="Assistant Settings"
         android:textSize="24sp"
         android:textStyle="bold"
         android:textColor="@color/earpieceai_on_background"
@@ -64,7 +64,7 @@
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Don't have an account? Sign up at earpieceai.ai"
+        android:text="Account setup is unavailable in this standalone Assistant build."
         android:textSize="12sp"
         android:textColor="@color/earpieceai_on_surface"
         android:gravity="center"

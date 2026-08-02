@@ -22,6 +22,7 @@ Desktop dictation is included locally and shares the persistent Whisper service 
 ├── README.md             # This guide
 └── android/              # Standalone Android application client
     ├── app/
+    ├── swiftsay-local/    # SwiftSay-style client using the computer Whisper service
     ├── gradle/
     └── ...
 ```
@@ -50,12 +51,13 @@ Connects to your active Chromium browser (remote-debugging on port `9233`) and a
 
 ### 3. `android/` (Standalone Android App Client)
 A Kotlin-based Android app compiled and installed on your phone.
-- **Recording:** Captures audio from your microphone/earpiece and saves to FLAC.
-- **Voice Bridge Request:** POSTs the FLAC audio payload to `http://<your-pc-ip>:9090/voice-command`.
+- **Recording:** Captures 16 kHz mono audio and writes WAV for private/local server addresses or fast level-0 FLAC for remote addresses.
+- **Voice Bridge Request:** POSTs the selected audio payload to `http://<your-pc-ip>:9090/voice-command`.
+- **Imported audio tails:** Copies compressed M4A/AAC packets or MP3 frames without decoding when possible, then falls back to PCM decode and level-0 FLAC when direct extraction is unsupported.
 - **TTS rendering:** Leverages on-device Android `TextToSpeech` to speak responses back into the earpiece.
 
 ### 4. `desktop_dictation/` (Desktop Dictation Client)
-`toggle.sh` starts or stops a uniquely named microphone recording. Completed recordings are processed in order by `queue-worker.sh`, sent to `whisper_service.py`, and inserted by `transcribe-and-type.py` through the modifier-safe `wayland-type-helper.sh`. Failed server requests remain queued under `$XDG_STATE_HOME/assistant-desktop-dictation/queue` for the next invocation, including across restarts. Modifier refusals are reported to `/client-event` and are not retried as delayed keyboard input.
+`toggle.sh` starts or stops a uniquely named microphone recording. Completed recordings are processed in order by `queue-worker.sh`, sent to `whisper_service.py`, and inserted by `transcribe-and-type.py` through the modifier-safe `wayland-type-helper.sh`. Failed server requests remain queued under `$XDG_STATE_HOME/assistant-desktop-dictation/queue` for the next invocation, including across restarts. Delivery completion and modifier refusals are reported to `/desktop-delivery-report`; refused text is not retried as delayed keyboard input.
 
 ---
 
@@ -90,7 +92,11 @@ uv run python whisper_service.py \
   --variant-source en_US \
   --variant-target en_GB
 ```
+For faster long recordings, audio at least 60 seconds long uses the loaded GPU model through faster-whisper's batched pipeline with batch size 2. If that attempt fails, the service retries the same file with ordinary GPU transcription before using the cached CPU fallback for a CUDA memory failure. Configure this with `--batch-threshold-seconds` and `--long-audio-batch-size`, or `WHISPER_BATCH_THRESHOLD_SECONDS` and `WHISPER_LONG_AUDIO_BATCH_SIZE`; batch size 1 disables batching.
+
 *It listens on `http://0.0.0.0:5001`. You can also override `--device`, `--compute-type`, `--host`, and `--port`, or use `WHISPER_BACKEND`, `WHISPER_MODEL`, `WHISPER_DEVICE`, `WHISPER_COMPUTE_TYPE`, `WHISPER_HOST`, and `WHISPER_PORT`. Variant conversion can also be controlled with `WHISPER_VARIANT_CONVERSION`, `WHISPER_VARIANT_SOURCE`, and `WHISPER_VARIANT_TARGET`.*
+
+Generic HTTP access records are hidden by default because the transcription and delivery events already report their outcomes. Enable them for protocol debugging with `--http-access-log` or `WHISPER_HTTP_ACCESS_LOG=true`.
 
 ### Step 3: Start the Voice Bridge
 Run the main server:
@@ -106,6 +112,7 @@ Bind the numeric keypad `+` shortcut to:
 /home/lewis/Dev/assistant/desktop_dictation/toggle.sh
 ```
 The first press starts recording and the second press stops it, queues it, transcribes it through port `5001`, and types it only when no modifier key is held. Logs are written to `$XDG_STATE_HOME/assistant-desktop-dictation/dictation.log`.
+PipeWire is used normally. If its recorder process does not produce audio shortly after startup, the client retries the same recording through direct ALSA using `plughw`; it prefers a device named `Yeti Stereo Microphone` and otherwise chooses the first capture device. Set `ASSISTANT_ALSA_DEVICE=plughw:<card>,<device>` to override detection, or set `ASSISTANT_PIPEWIRE_HEALTH_DELAY_S` to adjust the startup check delay.
 The included `net.local.trigger.sh.desktop` launcher preserves the existing KDE shortcut service ID when installed under `~/.local/share/applications`.
 
 ### Step 5: Install and Run the Android Client
@@ -118,3 +125,12 @@ The included `net.local.trigger.sh.desktop` launcher preserves the existing KDE 
 3. Pair your Bluetooth earpiece/earbuds to the phone.
 4. Launch **SwiftSay** on your phone, configure overlay and accessibility permissions, and tap **Start Service**.
 5. Tap the floating microphone button, speak, and tap it again when finished.
+
+### Step 6: Build SwiftSay Local
+`swiftsay-local` is a separate app variant. It keeps SwiftSay's floating recording button and accessibility text insertion, but sends its FLAC recording directly to the computer's `whisper_service.py` at `/transcribe_raw` instead of using the hosted API.
+```bash
+cd ~/Dev/assistant/android
+./gradlew :swiftsay-local:assembleDebug -Pkotlin.compiler.execution.strategy=in-process
+cp swiftsay-local/build/outputs/apk/debug/swiftsay-local-debug.apk ~/Dev/assistant/SwiftSayLocal.apk
+```
+Install `SwiftSayLocal.apk`, open **Whisper Server Settings**, enter the computer's LAN address and port `5001`, then start `whisper_service.py` before starting the floating service.

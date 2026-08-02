@@ -64,7 +64,7 @@ class FloatingButtonService : Service() {
         private const val DEEPINFRA_LANGUAGE = "en"
         private const val DEEPINFRA_INITIAL_PROMPT = "Hello."
         private const val DEEPINFRA_TEMPERATURE = "0"
-        private const val LATEST_RECORDING_FILE_NAME = "latest_recording.flac"
+        private const val LATEST_RECORDING_FILE_STEM = "latest_recording"
         private const val LOCAL_COMMAND_COOLDOWN_MS = 1500L
         private const val AUDIO_SAMPLE_RATE = 16000
         private const val LONG_COMMAND_DURATION_SAMPLES = (AUDIO_SAMPLE_RATE * 1.2f).toInt()
@@ -172,8 +172,9 @@ class FloatingButtonService : Service() {
         var requestId: String = "",
         val recordingStopStartedMs: Long,
         var audioSamples: Int = 0,
-        var flacBytes: Long = 0L,
-        var flacEncodeMs: Long = -1L,
+        var audioFormat: String = "unknown",
+        var audioBytes: Long = 0L,
+        var audioEncodeMs: Long = -1L,
         var uploadAckMs: Long = -1L,
         var serverPushWaitMs: Long = -1L,
         var responseReceivedMs: Long = -1L,
@@ -189,9 +190,10 @@ class FloatingButtonService : Service() {
 
     private data class QueuedVoiceRecording(
         val audioFile: File,
+        val audioFormat: AudioTransportFormat,
         val recordingStopStartedMs: Long,
         val audioSampleCount: Int,
-        val flacEncodeMs: Long,
+        val audioEncodeMs: Long,
         val queuedAtMs: Long = SystemClock.elapsedRealtime(),
         var attemptCount: Int = 0
     )
@@ -492,33 +494,39 @@ class FloatingButtonService : Service() {
                     lastRecordingDurationSeconds = audioData.size / 16000.0
                     Log.d(TAG, "Audio data received: ${audioData.size} samples (${audioData.size / 16000.0f}s)")
 
-                    val flacStartedAt = SystemClock.elapsedRealtime()
-                    val flacFile = saveAudioToFlac(audioData)
-                    val flacEncodeMs =
-                        (SystemClock.elapsedRealtime() - flacStartedAt).coerceAtLeast(0L)
+                    val audioFormat = AudioTransportPolicy.formatForHost(VoiceBridgePreferences.getHost(this@FloatingButtonService))
+                    val encodeStartedAt = SystemClock.elapsedRealtime()
+                    val audioFile = saveAudioForTransport(audioData, audioFormat)
+                    val audioEncodeMs =
+                        (SystemClock.elapsedRealtime() - encodeStartedAt).coerceAtLeast(0L)
 
-                    if (flacFile != null && flacFile.exists() && flacFile.length() > 0) {
-                        Log.d(TAG, "Audio saved to FLAC: ${flacFile.length()} bytes")
-                        saveLatestRecordingToDownloads(flacFile)
+                    if (audioFile != null && audioFile.exists() && audioFile.length() > 0) {
+                        Log.d(
+                            TAG,
+                            "Audio saved as ${audioFormat.name}: ${audioFile.length()} bytes in ${audioEncodeMs}ms"
+                        )
+                        saveLatestRecordingToDownloads(audioFile, audioFormat)
                         enqueueVoiceRecording(
                             QueuedVoiceRecording(
-                                audioFile = flacFile,
+                                audioFile = audioFile,
+                                audioFormat = audioFormat,
                                 recordingStopStartedMs = recordingStopStartedMs,
                                 audioSampleCount = audioData.size,
-                                flacEncodeMs = flacEncodeMs
+                                audioEncodeMs = audioEncodeMs
                             )
                         )
                     } else {
-                        Log.w(TAG, "Failed to save audio to FLAC or file is empty")
+                        Log.w(TAG, "Failed to save audio as ${audioFormat.name} or file is empty")
                         withContext(Dispatchers.Main) {
                             showToast("Failed to save audio", Toast.LENGTH_SHORT)
                         }
                         logVoiceRequestTiming(
-                            "failed:flac",
+                            "failed:audio-encode",
                             VoiceRequestTiming(
                                 recordingStopStartedMs = recordingStopStartedMs,
                                 audioSamples = audioData.size,
-                                flacEncodeMs = flacEncodeMs,
+                                audioFormat = audioFormat.name.lowercase(Locale.US),
+                                audioEncodeMs = audioEncodeMs,
                                 responseReceivedMs =
                                     (SystemClock.elapsedRealtime() - recordingStopStartedMs).coerceAtLeast(0L)
                             )
@@ -1427,9 +1435,10 @@ class FloatingButtonService : Service() {
                 }
                 val bridgeResult = sendToVoiceBridge(
                     audioFile = recording.audioFile,
+                    audioFormat = recording.audioFormat,
                     recordingStopStartedMs = recording.recordingStopStartedMs,
                     audioSampleCount = recording.audioSampleCount,
-                    flacEncodeMs = recording.flacEncodeMs
+                    audioEncodeMs = recording.audioEncodeMs
                 )
                 withContext(Dispatchers.Main) {
                     showToast("Response received; starting speech", Toast.LENGTH_SHORT)
@@ -1475,15 +1484,44 @@ class FloatingButtonService : Service() {
         }
     }
 
+    private fun saveAudioForTransport(
+        audioData: FloatArray,
+        audioFormat: AudioTransportFormat
+    ): File? {
+        return when (audioFormat) {
+            AudioTransportFormat.WAV -> saveAudioToWav(audioData)
+            AudioTransportFormat.FLAC -> saveAudioToFlac(audioData)
+        }
+    }
+
+    private fun saveAudioToWav(audioData: FloatArray): File? {
+        val outputFile = File.createTempFile("queued_voice_", ".wav", voiceUploadQueueDir())
+        return try {
+            FileOutputStream(outputFile).use { output ->
+                writeWavHeader(output, audioData.size * 2, AUDIO_SAMPLE_RATE, 1, 16)
+                val buffer = ByteBuffer.allocate(64 * 1024).order(ByteOrder.LITTLE_ENDIAN)
+                for (sample in audioData) {
+                    if (buffer.remaining() < 2) {
+                        buffer.flip()
+                        while (buffer.hasRemaining()) output.channel.write(buffer)
+                        buffer.clear()
+                    }
+                    buffer.putShort(floatToPcm16(sample))
+                }
+                buffer.flip()
+                while (buffer.hasRemaining()) output.channel.write(buffer)
+            }
+            outputFile
+        } catch (error: Exception) {
+            Log.e(TAG, "Failed to save WAV file", error)
+            outputFile.delete()
+            null
+        }
+    }
+
     private fun saveAudioToFlac(audioData: FloatArray): File? {
         return try {
-            val sampleRate = 16000
-            val pcmData = ShortArray(audioData.size)
-            for (i in audioData.indices) {
-                pcmData[i] = (audioData[i] * 32767).toInt().coerceIn(-32768, 32767).toShort()
-            }
-
-            val flacFile = encodePcmToFlac(pcmData, sampleRate, 1)
+            val flacFile = encodePcmToFlac(audioData, AUDIO_SAMPLE_RATE, 1)
             if (flacFile != null) {
                 Log.d(TAG, "Saved FLAC file: ${flacFile.absolutePath}, size: ${flacFile.length()} bytes")
             }
@@ -1540,9 +1578,14 @@ class FloatingButtonService : Service() {
         )
     }
 
-    private fun encodePcmToFlac(pcmData: ShortArray, sampleRate: Int, channels: Int): File? {
+    private fun floatToPcm16(sample: Float): Short {
+        return (sample * 32767).toInt().coerceIn(-32768, 32767).toShort()
+    }
+
+    private fun encodePcmToFlac(audioData: FloatArray, sampleRate: Int, channels: Int): File? {
         val format = MediaFormat.createAudioFormat("audio/flac", sampleRate, channels).apply {
             setInteger(MediaFormat.KEY_PCM_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
+            setInteger(MediaFormat.KEY_FLAC_COMPRESSION_LEVEL, 0)
         }
         val codecName = MediaCodecList(MediaCodecList.ALL_CODECS).findEncoderForFormat(format)
         if (codecName.isNullOrBlank()) {
@@ -1552,21 +1595,16 @@ class FloatingButtonService : Service() {
 
         val outputFile = File.createTempFile("queued_voice_", ".flac", voiceUploadQueueDir())
 
-        val pcmBytes = ByteBuffer.allocate(pcmData.size * 2).order(ByteOrder.LITTLE_ENDIAN)
-        for (sample in pcmData) {
-            pcmBytes.putShort(sample)
-        }
-        val inputBytes = pcmBytes.array()
-
         var codec: MediaCodec? = null
         try {
+            Log.d(TAG, "Using FLAC encoder '$codecName' at compression level 0")
             codec = MediaCodec.createByCodecName(codecName)
             codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             codec.start()
 
             FileOutputStream(outputFile).use { output ->
                 val bufferInfo = MediaCodec.BufferInfo()
-                var inputOffset = 0
+                var inputSampleOffset = 0
                 var inputDone = false
                 var outputDone = false
 
@@ -1575,19 +1613,25 @@ class FloatingButtonService : Service() {
                         val inputIndex = codec.dequeueInputBuffer(10_000)
                         if (inputIndex >= 0) {
                             val inputBuffer = codec.getInputBuffer(inputIndex)
-                            inputBuffer?.clear()
-                            val remaining = inputBytes.size - inputOffset
-                            if (remaining > 0 && inputBuffer != null) {
-                                val size = minOf(remaining, inputBuffer.remaining())
-                                inputBuffer.put(inputBytes, inputOffset, size)
-                                inputOffset += size
-                                codec.queueInputBuffer(inputIndex, 0, size, 0, 0)
+                                ?: throw IOException("FLAC encoder input buffer unavailable")
+                            inputBuffer.clear()
+                            inputBuffer.order(ByteOrder.LITTLE_ENDIAN)
+                            val remainingSamples = audioData.size - inputSampleOffset
+                            if (remainingSamples > 0) {
+                                val sampleCount = minOf(remainingSamples, inputBuffer.remaining() / 2)
+                                val presentationTimeUs = inputSampleOffset.toLong() * 1_000_000L /
+                                    (sampleRate.toLong() * channels.toLong())
+                                repeat(sampleCount) {
+                                    inputBuffer.putShort(floatToPcm16(audioData[inputSampleOffset++]))
+                                }
+                                codec.queueInputBuffer(inputIndex, 0, sampleCount * 2, presentationTimeUs, 0)
                             } else {
                                 codec.queueInputBuffer(
                                     inputIndex,
                                     0,
                                     0,
-                                    0,
+                                    inputSampleOffset.toLong() * 1_000_000L /
+                                        (sampleRate.toLong() * channels.toLong()),
                                     MediaCodec.BUFFER_FLAG_END_OF_STREAM
                                 )
                                 inputDone = true
@@ -1602,9 +1646,7 @@ class FloatingButtonService : Service() {
                             if (outputBuffer != null && bufferInfo.size > 0) {
                                 outputBuffer.position(bufferInfo.offset)
                                 outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
-                                val outBytes = ByteArray(bufferInfo.size)
-                                outputBuffer.get(outBytes)
-                                output.write(outBytes)
+                                while (outputBuffer.hasRemaining()) output.channel.write(outputBuffer)
                             }
                             codec.releaseOutputBuffer(outputIndex, false)
                             if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
@@ -1651,10 +1693,10 @@ class FloatingButtonService : Service() {
         }
     }
 
-    private fun saveLatestRecordingToDownloads(source: File) {
+    private fun saveLatestRecordingToDownloads(source: File, audioFormat: AudioTransportFormat) {
         try {
-            val fileName = LATEST_RECORDING_FILE_NAME
-            val mimeType = "audio/flac"
+            val fileName = "$LATEST_RECORDING_FILE_STEM.${audioFormat.extension}"
+            val mimeType = audioFormat.mimeType
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 deleteExistingDownloadRecordingsQ()
                 val values = ContentValues().apply {
@@ -1685,7 +1727,7 @@ class FloatingButtonService : Service() {
                     targetDir.mkdirs()
                 }
                 targetDir.listFiles()?.forEach { existing ->
-                    if (existing.isFile && existing.extension.equals("flac", ignoreCase = true)) {
+                    if (existing.isFile && existing.nameWithoutExtension == LATEST_RECORDING_FILE_STEM) {
                         existing.delete()
                     }
                 }
@@ -1708,7 +1750,7 @@ class FloatingButtonService : Service() {
         val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
         val relativePath = Environment.DIRECTORY_DOWNLOADS + "/EarpieceAI/"
         val selection = "${MediaStore.Downloads.RELATIVE_PATH}=? AND ${MediaStore.Downloads.DISPLAY_NAME} LIKE ?"
-        val selectionArgs = arrayOf(relativePath, "%.flac")
+        val selectionArgs = arrayOf(relativePath, "$LATEST_RECORDING_FILE_STEM.%")
         resolver.delete(collection, selection, selectionArgs)
     }
 
@@ -2065,16 +2107,18 @@ class FloatingButtonService : Service() {
 
     private suspend fun sendToVoiceBridge(
         audioFile: File,
+        audioFormat: AudioTransportFormat,
         recordingStopStartedMs: Long,
         audioSampleCount: Int,
-        flacEncodeMs: Long
+        audioEncodeMs: Long
     ): VoiceBridgeResult {
         return withContext(Dispatchers.IO) {
             val timing = VoiceRequestTiming(
                 recordingStopStartedMs = recordingStopStartedMs,
                 audioSamples = audioSampleCount,
-                flacBytes = audioFile.length(),
-                flacEncodeMs = flacEncodeMs
+                audioFormat = audioFormat.name.lowercase(Locale.US),
+                audioBytes = audioFile.length(),
+                audioEncodeMs = audioEncodeMs
             )
             val baseUrl = voiceBridgeBaseUrl()
             val requestBody = audioFile.asRequestBody("application/octet-stream".toMediaType())
@@ -2273,8 +2317,9 @@ class FloatingButtonService : Service() {
             "Voice timing [$stage] requestId=${timing.requestId} " +
                 "clip_s=${"%.2f".format(Locale.US, clipSeconds)} " +
                 "tail_extract_ms=-1 " +
-                "flac_bytes=${timing.flacBytes} " +
-                "flac_encode_ms=${timing.flacEncodeMs} " +
+                "audio_format=${timing.audioFormat} " +
+                "audio_bytes=${timing.audioBytes} " +
+                "audio_encode_ms=${timing.audioEncodeMs} " +
                 "upload_ack_ms=${timing.uploadAckMs} " +
                 "bridge_upload_body_read_ms=${server?.bridgeUploadBodyReadMs ?: -1} " +
                 "server_push_wait_ms=${timing.serverPushWaitMs} " +

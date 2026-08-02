@@ -1,6 +1,7 @@
 import argparse
 import copy
 import ctypes
+import gc
 import glob
 import logging
 from logging.config import dictConfig
@@ -16,7 +17,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 
-service_logger = logging.getLogger("uvicorn.error")
+service_logger = logging.getLogger("assistant.whisper")
 
 ANSI_RESET = "\033[0m"
 ANSI_CYAN = "\033[36m"
@@ -26,6 +27,20 @@ ANSI_GREEN = "\033[1;32m"
 ANSI_YELLOW = "\033[1;93m"
 ANSI_BREAKDOWN_VALUE = "\033[93m"
 ANSI_RED = "\033[1;31m"
+
+
+class FriendlyLogSource(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if (
+            record.name == "assistant.whisper"
+            and record.getMessage().startswith(("Delivery ", "Recording prepared:"))
+        ):
+            record.source = "Client"
+        elif record.name in {"assistant.whisper", "uvicorn", "uvicorn.access", "uvicorn.error"}:
+            record.source = "Server"
+        else:
+            record.source = "Application"
+        return True
 
 
 def ansi(text: str, colour: str) -> str:
@@ -41,14 +56,14 @@ def colour_timing_fields(output: str) -> str:
             continue
 
         leading = ""
-        while part.startswith("("):
-            leading += "("
+        while part.startswith(("(", "[")):
+            leading += part[0]
             part = part[1:]
             in_breakdown = True
 
         trailing = ""
-        while part.endswith(")"):
-            trailing = ")" + trailing
+        while part.endswith((")", "]")):
+            trailing = part[-1] + trailing
             part = part[:-1]
 
         if part == "+":
@@ -105,7 +120,7 @@ def service_log(*args, **kwargs) -> None:
         color_message = ansi(output, ANSI_RED)
     elif (
         output.startswith(("WARNING", "CUDA OOM"))
-        or "delivery-refused" in lowered
+        or output.startswith("Delivery refused:")
         or "refusing to type" in lowered
     ):
         level = logging.WARNING
@@ -117,10 +132,17 @@ def service_log(*args, **kwargs) -> None:
         elif output.startswith("Transcription timing"):
             prefix, _, timing = output.partition(" ")
             color_message = f"{ansi(prefix, ANSI_CYAN)} {colour_timing_fields(timing)}"
-        elif output.startswith("Client Event [") and "]: " in output:
-            label, timing = output.split("]: ", 1)
+        elif output.startswith(
+            ("Delivery complete: ", "Delivery refused: ", "Recording prepared: ")
+        ):
+            label, timing = output.split(": ", 1)
             color_message = (
-                f"{ansi(label + ']:', ANSI_CYAN)} {colour_timing_fields(timing)}"
+                f"{ansi(label + ':', ANSI_CYAN)} {colour_timing_fields(timing)}"
+            )
+        elif output.startswith("Audio received: "):
+            label, timing = output.split(": ", 1)
+            color_message = (
+                f"{ansi(label + ':', ANSI_GREEN)} {colour_timing_fields(timing)}"
             )
         else:
             color_message = output
@@ -177,6 +199,8 @@ class RuntimeConfig:
     no_speech_threshold: float
     compression_ratio_threshold: float
     initial_prompt: str
+    batch_threshold_seconds: float
+    long_audio_batch_size: int
     cpu_fallback_enabled: bool
     cpu_fallback_compute_type: str
     cpu_fallback_cpu_threads: int
@@ -186,21 +210,53 @@ class RuntimeConfig:
     variant_target: str
     host: str
     port: int
+    http_access_log: bool
 
 
 class FasterWhisperTranscriber:
     def __init__(self, config: RuntimeConfig) -> None:
-        from faster_whisper import WhisperModel
+        from faster_whisper import BatchedInferencePipeline, WhisperModel
 
         self.config = config
         self._whisper_model_cls = WhisperModel
+        self._batched_pipeline_cls = BatchedInferencePipeline
         self.model = None
+        self._batched_pipeline = None
         self._cpu_fallback_model = None
         self._gpu_model_needs_reload = False
         self._load_primary_model()
 
     def transcribe_file(self, audio_path: str) -> str:
         primary_model = self._get_primary_model()
+        duration_seconds = self._audio_duration_seconds(audio_path)
+        use_batched = (
+            self.config.device.startswith("cuda")
+            and self.config.long_audio_batch_size > 1
+            and duration_seconds is not None
+            and duration_seconds >= self.config.batch_threshold_seconds
+        )
+
+        if use_batched:
+            print(
+                "Long audio detected: "
+                f"duration_seconds={duration_seconds:.2f} "
+                f"threshold_seconds={self.config.batch_threshold_seconds:g} "
+                f"batch_size={self.config.long_audio_batch_size}; "
+                "using batched GPU transcription."
+            )
+            try:
+                return self._transcribe_batched(primary_model, audio_path)
+            except Exception as exc:
+                self._batched_pipeline = None
+                batched_error = str(exc)
+                print(
+                    "WARNING: Batched GPU transcription failed; retrying the same audio "
+                    f"with ordinary GPU transcription before CPU fallback: {batched_error}"
+                )
+            # Leave the exception scope before clearing cache so its traceback cannot
+            # retain temporary allocations needed by the ordinary GPU retry.
+            self._release_cuda_cache()
+
         try:
             return self._transcribe_with_model(primary_model, audio_path)
         except Exception as exc:
@@ -214,24 +270,63 @@ class FasterWhisperTranscriber:
             )
             return self._transcribe_with_model(self._get_cpu_fallback_model(), audio_path)
 
-    def _transcribe_with_model(self, model, audio_path: str) -> str:
-        segments, _info = model.transcribe(
-            audio_path,
-            word_timestamps=False,
-            language=self.config.language,
-            beam_size=self.config.beam_size,
-            vad_filter=self.config.vad_filter,
-            vad_parameters={
+    def _transcription_options(self) -> dict:
+        return {
+            "word_timestamps": False,
+            "language": self.config.language,
+            "beam_size": self.config.beam_size,
+            "vad_filter": self.config.vad_filter,
+            "vad_parameters": {
                 "threshold": self.config.vad_threshold,
                 "min_silence_duration_ms": self.config.vad_min_silence_ms,
                 "speech_pad_ms": self.config.vad_speech_pad_ms,
             },
-            log_prob_threshold=self.config.log_prob_threshold,
-            no_speech_threshold=self.config.no_speech_threshold,
-            compression_ratio_threshold=self.config.compression_ratio_threshold,
-            initial_prompt=self.config.initial_prompt or None,
+            "log_prob_threshold": self.config.log_prob_threshold,
+            "no_speech_threshold": self.config.no_speech_threshold,
+            "compression_ratio_threshold": self.config.compression_ratio_threshold,
+            "initial_prompt": self.config.initial_prompt or None,
+        }
+
+    def _transcribe_with_model(self, model, audio_path: str) -> str:
+        segments, _info = model.transcribe(audio_path, **self._transcription_options())
+        return "".join(segment.text for segment in segments).strip()
+
+    def _transcribe_batched(self, primary_model, audio_path: str) -> str:
+        if self._batched_pipeline is None:
+            self._batched_pipeline = self._batched_pipeline_cls(primary_model)
+        segments, _info = self._batched_pipeline.transcribe(
+            audio_path,
+            batch_size=self.config.long_audio_batch_size,
+            **self._transcription_options(),
         )
         return "".join(segment.text for segment in segments).strip()
+
+    def _audio_duration_seconds(self, audio_path: str) -> float | None:
+        try:
+            import av
+
+            with av.open(audio_path) as container:
+                if container.duration is not None:
+                    return float(container.duration / av.time_base)
+                for stream in container.streams.audio:
+                    if stream.duration is not None and stream.time_base is not None:
+                        return float(stream.duration * stream.time_base)
+        except Exception as exc:
+            print(
+                "WARNING: Could not inspect audio duration; using ordinary transcription: "
+                f"{exc}"
+            )
+        return None
+
+    def _release_cuda_cache(self) -> None:
+        gc.collect()
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except (ImportError, RuntimeError):
+            pass
 
     def _should_retry_on_cpu(self, exc: Exception) -> bool:
         if not self.config.cpu_fallback_enabled:
@@ -271,6 +366,7 @@ class FasterWhisperTranscriber:
             device=self.config.device,
             compute_type=self.config.compute_type,
         )
+        self._batched_pipeline = None
         self._gpu_model_needs_reload = False
         print("faster-whisper model loaded successfully.")
 
@@ -282,6 +378,7 @@ class FasterWhisperTranscriber:
 
     def _invalidate_primary_model(self, reason: str) -> None:
         self.model = None
+        self._batched_pipeline = None
         self._gpu_model_needs_reload = True
         print(f"Marked faster-whisper primary model for reload: {reason}")
 
@@ -425,6 +522,16 @@ def build_runtime_config(args: argparse.Namespace | None = None) -> RuntimeConfi
         or os.environ.get("WHISPER_COMPRESSION_RATIO_THRESHOLD", "2.4")
     )
     initial_prompt = (args.initial_prompt if args else None) or os.environ.get("WHISPER_INITIAL_PROMPT", "")
+    batch_threshold_seconds_value = (
+        args.batch_threshold_seconds
+        if args is not None and args.batch_threshold_seconds is not None
+        else os.environ.get("WHISPER_BATCH_THRESHOLD_SECONDS", "60")
+    )
+    long_audio_batch_size_value = (
+        args.long_audio_batch_size
+        if args is not None and args.long_audio_batch_size is not None
+        else os.environ.get("WHISPER_LONG_AUDIO_BATCH_SIZE", "2")
+    )
     cpu_fallback_enabled = (
         (args.cpu_fallback if args else None)
         if args is not None and args.cpu_fallback is not None
@@ -452,6 +559,12 @@ def build_runtime_config(args: argparse.Namespace | None = None) -> RuntimeConfi
     variant_target = (args.variant_target if args else None) or os.environ.get("WHISPER_VARIANT_TARGET", "en_GB")
     host = (args.host if args else None) or os.environ.get("WHISPER_HOST", "0.0.0.0")
     port_value = (args.port if args else None) or os.environ.get("WHISPER_PORT", "5001")
+    http_access_log = (
+        args.http_access_log
+        if args is not None and args.http_access_log is not None
+        else os.environ.get("WHISPER_HTTP_ACCESS_LOG", "false").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
     return RuntimeConfig(
         backend=backend,
         model_name=model_name,
@@ -467,6 +580,8 @@ def build_runtime_config(args: argparse.Namespace | None = None) -> RuntimeConfi
         no_speech_threshold=float(no_speech_threshold_value),
         compression_ratio_threshold=float(compression_ratio_threshold_value),
         initial_prompt=initial_prompt,
+        batch_threshold_seconds=max(0.0, float(batch_threshold_seconds_value)),
+        long_audio_batch_size=max(1, int(long_audio_batch_size_value)),
         cpu_fallback_enabled=bool(cpu_fallback_enabled),
         cpu_fallback_compute_type=cpu_fallback_compute_type,
         cpu_fallback_cpu_threads=max(1, int(cpu_fallback_cpu_threads_value)),
@@ -476,6 +591,7 @@ def build_runtime_config(args: argparse.Namespace | None = None) -> RuntimeConfi
         variant_target=variant_target,
         host=host,
         port=int(port_value),
+        http_access_log=bool(http_access_log),
     )
 
 
@@ -553,21 +669,9 @@ def ensure_transcriber_loaded() -> None:
 
 
 def format_timing_fields(outcome: str, timings: dict[str, int]) -> str:
-    client_components = (
-        "client_stop_finalize_ms",
-        "client_queue_wait_ms",
-        "client_file_read_ms",
-    )
-    client_breakdown = format_timing_breakdown(
-        timings,
-        "client_stop_to_upload_ms",
-        client_components,
-        "client_pre_upload_overhead_ms",
-    )
     server_components = (
         "transcriber_ready_ms",
         "temp_file_open_ms",
-        "upload_body_read_ms",
         "temp_file_close_ms",
         "latest_recovery_copy_ms",
         "server_transcribe_ms",
@@ -580,21 +684,45 @@ def format_timing_fields(outcome: str, timings: dict[str, int]) -> str:
         server_components,
         "server_overhead_ms",
     )
-    hidden_keys = set(client_components if client_breakdown else ())
-    if server_breakdown:
-        hidden_keys.update(server_components)
+    outcome_line = f"outcome={outcome}"
+    if timings["failed_recovery_copy_ms"] >= 0:
+        outcome_line += f" failed_recovery_copy_ms={timings['failed_recovery_copy_ms']}"
+    return " ".join(
+        (
+            outcome_line,
+            f"server_total_ms={timings['server_total_ms']}{server_breakdown}",
+        )
+    )
 
-    fields = [f"outcome={outcome}"]
-    for key, value in timings.items():
-        if key in hidden_keys:
-            continue
-        field = f"{key}={value}"
-        if key == "client_stop_to_upload_ms":
-            field += client_breakdown
-        elif key == "server_total_ms":
-            field += server_breakdown
-        fields.append(field)
-    return " ".join(fields)
+
+def format_client_preparation(timings: dict[str, int]) -> str:
+    client_components = (
+        "client_stop_finalize_ms",
+        "client_queue_wait_ms",
+        "client_file_read_ms",
+    )
+    client_breakdown = format_timing_breakdown(
+        timings,
+        "client_stop_to_upload_ms",
+        client_components,
+        "client_pre_upload_overhead_ms",
+        opening="[",
+        closing="]",
+    )
+    return (
+        f"client_recording_duration_ms={timings['client_recording_duration_ms']} "
+        f"client_stop_to_upload_ms={timings['client_stop_to_upload_ms']}"
+        f"{client_breakdown}"
+    )
+
+
+def format_audio_size(audio_bytes: int) -> str:
+    return (
+        f"audio_bytes={audio_bytes} "
+        f"({audio_bytes / 1024:.2f} KiB, "
+        f"{audio_bytes / (1024**2):.3f} MiB, "
+        f"{audio_bytes / (1024**3):.6f} GiB)"
+    )
 
 
 def format_timing_breakdown(
@@ -602,6 +730,8 @@ def format_timing_breakdown(
     aggregate_key: str,
     component_keys: tuple[str, ...],
     overhead_key: str,
+    opening: str = "(",
+    closing: str = ")",
 ) -> str:
     values = [timings.get(key, -1) for key in component_keys]
     aggregate = timings[aggregate_key]
@@ -615,7 +745,7 @@ def format_timing_breakdown(
     components = [f"{key}={timings[key]}" for key in component_keys]
     if overhead:
         components.append(f"{overhead_key}={overhead}")
-    return f" ({' + '.join(components)})"
+    return f" {opening}{' + '.join(components)}{closing}"
 
 
 def client_timing_value(request: Request, header_name: str) -> int:
@@ -665,7 +795,8 @@ async def transcribe_raw(request: Request):
 
         temp_file_open_started = time.perf_counter()
         temp_file_close_started: float | None = None
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        # Clients send WAV, FLAC, M4A, or MP3; let PyAV probe the actual bytes.
+        with tempfile.NamedTemporaryFile(suffix=".audio", delete=False) as tmp:
             tmp_path = tmp.name
             timings["temp_file_open_ms"] = round(
                 (time.perf_counter() - temp_file_open_started) * 1000
@@ -678,6 +809,15 @@ async def transcribe_raw(request: Request):
                 timings["audio_bytes"] += len(chunk)
             timings["upload_body_read_ms"] = round(
                 (time.perf_counter() - body_read_started) * 1000
+            )
+            client_host = request.client.host if request.client is not None else "unknown"
+            print(f"Recording prepared: {format_client_preparation(timings)}")
+            print(
+                "Audio received: "
+                f"client={client_host} "
+                f"client_recording_duration_ms={timings['client_recording_duration_ms']} "
+                f"{format_audio_size(timings['audio_bytes'])} "
+                f"upload_body_read_ms={timings['upload_body_read_ms']}"
             )
             temp_file_close_started = time.perf_counter()
 
@@ -750,21 +890,30 @@ async def transcribe_raw(request: Request):
             (time.perf_counter() - cleanup_started) * 1000
         )
         timings["server_total_ms"] = round((time.perf_counter() - request_started) * 1000)
+        timing_fields = format_timing_fields(outcome, timings)
         if transcription_event is not None:
-            print(f"{transcription_event} | {format_timing_fields(outcome, timings)}")
+            print(f"{transcription_event} | {timing_fields}")
         else:
-            print(f"Transcription timing {format_timing_fields(outcome, timings)}")
+            print(f"Transcription timing | {timing_fields}")
 
 
-@app.post("/client-event")
-async def client_event(request: Request):
+@app.post("/client-event", include_in_schema=False)
+@app.post("/desktop-delivery-report")
+async def desktop_delivery_report(request: Request):
     payload = await request.json()
-    event = str(payload.get("event", "")).strip() or "unknown"
+    status = str(payload.get("status", "")).strip()
+    if not status:
+        legacy_event = str(payload.get("event", "")).strip()
+        status = legacy_event.removeprefix("desktop-delivery-") or "unknown"
     details = str(payload.get("details", "")).strip()
+    label = {
+        "complete": "Delivery complete",
+        "refused": "Delivery refused",
+    }.get(status, f"Delivery report received [{status}]")
     if details:
-        print(f"Client Event [{event}]: {details}")
+        print(f"{label}: {details}")
     else:
-        print(f"Client Event [{event}]")
+        print(label)
     return {"ok": True}
 
 
@@ -846,6 +995,18 @@ def parse_args() -> argparse.Namespace:
         help="Optional initial prompt for names, jargon, acronyms, and spelling hints.",
     )
     parser.add_argument(
+        "--batch-threshold-seconds",
+        type=float,
+        default=None,
+        help="Use batched GPU transcription at or above this audio duration. Defaults to 60 seconds.",
+    )
+    parser.add_argument(
+        "--long-audio-batch-size",
+        type=int,
+        default=None,
+        help="Batch size for long-audio GPU transcription. Defaults to 2; 1 disables batching.",
+    )
+    parser.add_argument(
         "--cpu-fallback",
         dest="cpu_fallback",
         action="store_true",
@@ -899,20 +1060,58 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--host", default=None, help="Bind host. Defaults to 0.0.0.0.")
     parser.add_argument("--port", type=int, default=None, help="Bind port. Defaults to 5001.")
+    parser.add_argument(
+        "--http-access-log",
+        dest="http_access_log",
+        action="store_true",
+        default=None,
+        help="Show one generic HTTP completion line per request. Disabled by default.",
+    )
+    parser.add_argument(
+        "--no-http-access-log",
+        dest="http_access_log",
+        action="store_false",
+        help="Hide generic HTTP completion lines.",
+    )
     return parser.parse_args()
+
+
+def build_log_config() -> dict:
+    from uvicorn.config import LOGGING_CONFIG
+
+    log_config = copy.deepcopy(LOGGING_CONFIG)
+    log_config["formatters"]["default"]["fmt"] = (
+        "%(asctime)s.%(msecs)03d %(source)s: %(message)s"
+    )
+    log_config["formatters"]["access"]["fmt"] = (
+        '%(asctime)s.%(msecs)03d %(source)s: %(client_addr)s - '
+        '"%(request_line)s" %(status_code)s'
+    )
+    log_config["formatters"]["default"]["datefmt"] = "%Y-%m-%d %H:%M:%S"
+    log_config["formatters"]["access"]["datefmt"] = "%Y-%m-%d %H:%M:%S"
+    log_config.setdefault("filters", {})["friendly_source"] = {"()": FriendlyLogSource}
+    for handler_name in ("default", "access"):
+        log_config["handlers"][handler_name]["filters"] = ["friendly_source"]
+    log_config["loggers"]["assistant.whisper"] = {
+        "handlers": ["default"],
+        "level": "INFO",
+        "propagate": False,
+    }
+    return log_config
 
 
 if __name__ == "__main__":
     import uvicorn
-    from uvicorn.config import LOGGING_CONFIG
 
-    log_config = copy.deepcopy(LOGGING_CONFIG)
-    log_config["formatters"]["default"]["fmt"] = "%(asctime)s.%(msecs)03d %(levelprefix)s %(message)s"
-    log_config["formatters"]["access"]["fmt"] = '%(asctime)s.%(msecs)03d %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s'
-    log_config["formatters"]["default"]["datefmt"] = "%Y-%m-%d %H:%M:%S"
-    log_config["formatters"]["access"]["datefmt"] = "%Y-%m-%d %H:%M:%S"
+    log_config = build_log_config()
     dictConfig(log_config)
 
     runtime_config = build_runtime_config(parse_args())
     configure_app(runtime_config)
-    uvicorn.run(app, host=runtime_config.host, port=runtime_config.port, log_config=log_config)
+    uvicorn.run(
+        app,
+        host=runtime_config.host,
+        port=runtime_config.port,
+        log_config=log_config,
+        access_log=runtime_config.http_access_log,
+    )

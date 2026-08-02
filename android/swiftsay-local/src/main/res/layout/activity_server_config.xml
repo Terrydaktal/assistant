@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@drawable/swiftsay_gradient_background"
+    android:padding="24dp"
+    android:fitsSystemWindows="true">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="SwiftSay Local Settings"
+        android:textSize="24sp"
+        android:textStyle="bold"
+        android:textColor="@color/swiftsay_on_background"
+        android:layout_marginBottom="28dp" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Computer host or IP address"
+        android:textColor="@color/swiftsay_on_surface"
+        android:layout_marginBottom="8dp" />
+
+    <EditText
+        android:id="@+id/host_edittext"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@drawable/swiftsay_input_background"
+        android:hint="192.168.50.51"
+        android:inputType="textUri"
+        android:textColor="@color/swiftsay_on_surface"
+        android:textColorHint="@color/swiftsay_hint"
+        android:layout_marginBottom="16dp" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Whisper service port"
+        android:textColor="@color/swiftsay_on_surface"
+        android:layout_marginBottom="8dp" />
+
+    <EditText
+        android:id="@+id/port_edittext"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@drawable/swiftsay_input_background"
+        android:hint="5001"
+        android:inputType="number"
+        android:textColor="@color/swiftsay_on_surface"
+        android:textColorHint="@color/swiftsay_hint"
+        android:layout_marginBottom="24dp" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="The app sends FLAC audio to /transcribe_raw and pastes the returned text into the focused field. Start whisper_service.py on the computer first."
+        android:textColor="@color/swiftsay_on_surface"
+        android:textSize="14sp"
+        android:layout_marginBottom="24dp" />
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/save_button"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Save settings"
+        style="@style/Widget.Swiftsay.Button.Primary" />
+
+</LinearLayout>

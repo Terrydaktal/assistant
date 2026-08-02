@@ -26,3 +26,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "earpieceai"
 include(":app")
+include(":swiftsay-local")

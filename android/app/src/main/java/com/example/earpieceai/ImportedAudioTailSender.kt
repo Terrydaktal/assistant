@@ -13,10 +13,13 @@ import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.ConnectionPool
+import okhttp3.MediaType
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.asRequestBody
+import okhttp3.RequestBody
+import okio.BufferedSink
+import okio.source
 import org.json.JSONObject
 import java.io.File
 import java.io.FileInputStream
@@ -27,11 +30,18 @@ import java.util.concurrent.TimeUnit
 object ImportedAudioTailSender {
     private const val TAG = "ImportedAudioTail"
     private const val CONNECT_TIMEOUT_SECONDS = 10L
-    private const val TRANSCRIPTION_TIMEOUT_SECONDS = 300L
+    private const val TRANSCRIPTION_TIMEOUT_SECONDS = 1_800L
 
     data class Result(
         val transcription: String,
         val timingSummary: String
+    )
+
+    data class ProgressUpdate(
+        val stage: String,
+        val elapsedMs: Long,
+        val stageMs: Long = -1,
+        val detail: String = ""
     )
 
     private data class WhisperServerTimings(
@@ -54,6 +64,21 @@ object ImportedAudioTailSender {
         cause: Throwable? = null
     ) : IOException(message, cause)
 
+    private class ProgressFileRequestBody(
+        private val file: File,
+        private val mediaType: MediaType,
+        private val onUploadComplete: () -> Unit
+    ) : RequestBody() {
+        override fun contentType(): MediaType = mediaType
+
+        override fun contentLength(): Long = file.length()
+
+        override fun writeTo(sink: BufferedSink) {
+            file.source().use { source -> sink.writeAll(source) }
+            onUploadComplete()
+        }
+    }
+
     private data class DecodedAudio(
         val pcmFile: File,
         val sampleRate: Int,
@@ -69,36 +94,90 @@ object ImportedAudioTailSender {
         context: Context,
         uri: Uri,
         tailSeconds: Int,
-        whisperBaseUrl: String
+        whisperBaseUrl: String,
+        onProgress: (ProgressUpdate) -> Unit = {}
     ): Result = withContext(Dispatchers.IO) {
         val requestStartedAt = System.currentTimeMillis()
+        fun report(stage: String, stageMs: Long = -1, detail: String = "") {
+            runCatching {
+                onProgress(
+                    ProgressUpdate(
+                        stage = stage,
+                        elapsedMs = System.currentTimeMillis() - requestStartedAt,
+                        stageMs = stageMs,
+                        detail = detail
+                    )
+                )
+            }.onFailure { error ->
+                Log.w(TAG, "Imported audio progress callback failed", error)
+            }
+        }
         var snapshotFile: File? = null
-        var flacFile: File? = null
+        var uploadFile: File? = null
+        var compressedTail: CompressedAudioTailExtractor.Result? = null
         var decoded: DecodedAudio? = null
         var tailExtractMs = -1L
         var flacEncodeMs = -1L
+        var audioFormat = "not_started"
+        var clientUploadMs = -1L
         var whisperRoundTripMs = -1L
         var serverTimings = WhisperServerTimings()
         try {
+            report("Request started", 0, "Preparing the last $tailSeconds seconds")
             val extractionStartedAt = System.currentTimeMillis()
-            decoded = try {
-                decodeTailFromUri(context, uri, tailSeconds)
-            } catch (fastPathError: Exception) {
-                Log.w(TAG, "Fast URI tail decode failed; falling back to full snapshot", fastPathError)
-                snapshotFile = copyUriSnapshot(context, uri)
-                decodeTailFromFile(context.cacheDir, snapshotFile, tailSeconds, "full_snapshot")
+            report("Extracting compressed recording tail")
+            try {
+                compressedTail = CompressedAudioTailExtractor.extract(context, uri, tailSeconds)
+                uploadFile = compressedTail.file
+                audioFormat = compressedTail.format
+                tailExtractMs = System.currentTimeMillis() - extractionStartedAt
+                report(
+                    stage = "Compressed recording tail ready",
+                    stageMs = tailExtractMs,
+                    detail = "${formatSeconds(compressedTail.durationUs / 1_000_000.0)} audio, " +
+                        "${formatBytes(compressedTail.file.length())} $audioFormat"
+                )
+            } catch (compressedCopyError: Exception) {
+                Log.w(TAG, "Compressed tail copy unavailable; falling back to decode and FLAC", compressedCopyError)
+                report(
+                    "Compressed copy unavailable",
+                    detail = "Falling back to PCM decode and FLAC"
+                )
+                decoded = try {
+                    decodeTailFromUri(context, uri, tailSeconds)
+                } catch (fastPathError: Exception) {
+                    Log.w(TAG, "Fast URI tail decode failed; falling back to full snapshot", fastPathError)
+                    report("Direct file access failed", detail = "Creating a readable snapshot")
+                    snapshotFile = copyUriSnapshot(context, uri)
+                    decodeTailFromFile(context.cacheDir, snapshotFile, tailSeconds, "full_snapshot")
+                }
+                tailExtractMs = System.currentTimeMillis() - extractionStartedAt
+                val decodedAudio = decoded ?: throw IOException("Audio tail extraction returned no data")
+                report(
+                    stage = "Recording tail decoded",
+                    stageMs = tailExtractMs,
+                    detail = "${formatSeconds(decodedAudio.durationUs / 1_000_000.0)} audio, " +
+                        "${formatBytes(decodedAudio.pcmFile.length())} temporary PCM"
+                )
+                val flacStartedAt = System.currentTimeMillis()
+                report("Encoding fallback FLAC")
+                uploadFile = AudioFlacEncoder.encodePcmFileToFlac(
+                    cacheDir = context.cacheDir,
+                    pcmFile = decodedAudio.pcmFile,
+                    sampleRate = decodedAudio.sampleRate,
+                    channels = decodedAudio.channelCount
+                )
+                flacEncodeMs = System.currentTimeMillis() - flacStartedAt
+                audioFormat = "flac"
+                val encodedFile = uploadFile ?: throw IOException("FLAC encoder unavailable")
+                report(
+                    stage = "Fallback FLAC encoding finished",
+                    stageMs = flacEncodeMs,
+                    detail = formatBytes(encodedFile.length())
+                )
             }
-            tailExtractMs = System.currentTimeMillis() - extractionStartedAt
-            val decodedAudio = decoded ?: throw IOException("Audio tail extraction returned no data")
-            val flacStartedAt = System.currentTimeMillis()
-            flacFile = AudioFlacEncoder.encodePcmFileToFlac(
-                cacheDir = context.cacheDir,
-                pcmFile = decodedAudio.pcmFile,
-                sampleRate = decodedAudio.sampleRate,
-                channels = decodedAudio.channelCount
-            )
-            flacEncodeMs = System.currentTimeMillis() - flacStartedAt
-            if (flacFile == null) throw IOException("FLAC encoder unavailable")
+            val preparedAudioFile = uploadFile ?: throw IOException("Audio tail preparation returned no file")
+            val clipDurationUs = compressedTail?.durationUs ?: decoded?.durationUs ?: 0L
 
             val client = OkHttpClient.Builder()
                 .connectTimeout(CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
@@ -107,7 +186,19 @@ object ImportedAudioTailSender {
                 .connectionPool(ConnectionPool(5, 5, TimeUnit.MINUTES))
                 .build()
 
-            val requestBody = flacFile.asRequestBody("application/octet-stream".toMediaType())
+            val uploadStartedAt = System.currentTimeMillis()
+            report("Uploading audio to computer")
+            val requestBody = ProgressFileRequestBody(
+                file = preparedAudioFile,
+                mediaType = "application/octet-stream".toMediaType()
+            ) {
+                clientUploadMs = System.currentTimeMillis() - uploadStartedAt
+                report(
+                    stage = "Upload sent; waiting for Whisper result",
+                    stageMs = clientUploadMs,
+                    detail = "${formatBytes(preparedAudioFile.length())} $audioFormat"
+                )
+            }
             val request = Request.Builder()
                 .url("$whisperBaseUrl/transcribe_raw")
                 .post(requestBody)
@@ -116,13 +207,46 @@ object ImportedAudioTailSender {
             val whisperResult = transcribe(client, request)
             whisperRoundTripMs = whisperResult.roundTripMs
             serverTimings = whisperResult.timings
+            if (serverTimings.uploadBodyReadMs >= 0) {
+                report(
+                    stage = "Computer received audio",
+                    stageMs = serverTimings.uploadBodyReadMs,
+                    detail = "Server upload read"
+                )
+            }
+            if (serverTimings.serverTranscribeMs >= 0) {
+                val speed = if (serverTimings.serverTranscribeMs > 0) {
+                    clipDurationUs / 1000.0 / serverTimings.serverTranscribeMs
+                } else {
+                    0.0
+                }
+                report(
+                    stage = "Whisper transcription finished",
+                    stageMs = serverTimings.serverTranscribeMs,
+                    detail = if (speed > 0) "${String.format(java.util.Locale.US, "%.1fx", speed)} realtime" else ""
+                )
+            }
+            if (serverTimings.postprocessMs >= 0) {
+                report(
+                    stage = "Text post-processing finished",
+                    stageMs = serverTimings.postprocessMs
+                )
+            }
+            report(
+                stage = "Computer returned transcription",
+                stageMs = whisperRoundTripMs,
+                detail = "Complete HTTP round trip"
+            )
             val timing = buildTimingSummary(
                 outcome = "success",
                 tailSeconds = tailSeconds,
                 decoded = decoded,
+                compressedTail = compressedTail,
                 tailExtractMs = tailExtractMs,
                 flacEncodeMs = flacEncodeMs,
-                flacBytes = flacFile.length(),
+                clientUploadMs = clientUploadMs,
+                audioFormat = audioFormat,
+                audioBytes = preparedAudioFile.length(),
                 snapshotBytes = snapshotFile?.length() ?: 0,
                 whisperRoundTripMs = whisperRoundTripMs,
                 serverTimings = serverTimings,
@@ -130,6 +254,7 @@ object ImportedAudioTailSender {
             )
             DebugTimingStore.saveLastTiming(context, timing)
             Log.d(TAG, timing)
+            report("Transcription ready", detail = "Copying to the phone clipboard")
             Result(
                 transcription = whisperResult.transcription,
                 timingSummary = timing
@@ -143,9 +268,12 @@ object ImportedAudioTailSender {
                 outcome = "failed:${error.javaClass.simpleName}",
                 tailSeconds = tailSeconds,
                 decoded = decoded,
+                compressedTail = compressedTail,
                 tailExtractMs = tailExtractMs,
                 flacEncodeMs = flacEncodeMs,
-                flacBytes = flacFile?.length() ?: 0,
+                clientUploadMs = clientUploadMs,
+                audioFormat = audioFormat,
+                audioBytes = uploadFile?.length() ?: 0,
                 snapshotBytes = snapshotFile?.length() ?: 0,
                 whisperRoundTripMs = whisperRoundTripMs,
                 serverTimings = serverTimings,
@@ -153,11 +281,12 @@ object ImportedAudioTailSender {
             )
             DebugTimingStore.saveLastTiming(context, timing)
             Log.e(TAG, timing, error)
+            report("Request failed", detail = error.message ?: error.javaClass.simpleName)
             throw error
         } finally {
             decoded?.pcmFile?.delete()
             snapshotFile?.delete()
-            flacFile?.delete()
+            uploadFile?.delete()
         }
     }
 
@@ -467,15 +596,24 @@ object ImportedAudioTailSender {
         outcome: String,
         tailSeconds: Int,
         decoded: DecodedAudio?,
+        compressedTail: CompressedAudioTailExtractor.Result?,
         tailExtractMs: Long,
         flacEncodeMs: Long,
-        flacBytes: Long,
+        clientUploadMs: Long,
+        audioFormat: String,
+        audioBytes: Long,
         snapshotBytes: Long,
         whisperRoundTripMs: Long,
         serverTimings: WhisperServerTimings,
         totalMs: Long
     ): String {
-        val clipSeconds = decoded?.durationUs?.div(1_000_000.0) ?: 0.0
+        val clipDurationUs = compressedTail?.durationUs ?: decoded?.durationUs ?: 0L
+        val clipSeconds = clipDurationUs / 1_000_000.0
+        val preparationMode = compressedTail?.let { "compressed_${it.format}_copy" }
+            ?: decoded?.decodeMode
+            ?: "not_started"
+        val sourceBytes = compressedTail?.sourceBytes ?: decoded?.sourceBytes ?: 0L
+        val openMs = compressedTail?.openMs ?: decoded?.openMs ?: -1L
         val networkOverheadMs = if (whisperRoundTripMs >= 0 && serverTimings.serverTotalMs >= 0) {
             (whisperRoundTripMs - serverTimings.serverTotalMs).coerceAtLeast(0)
         } else {
@@ -485,14 +623,16 @@ object ImportedAudioTailSender {
             append("Imported audio timing outcome=$outcome ")
             append("tail_request_s=$tailSeconds ")
             append("decoded_clip_s=${"%.2f".format(java.util.Locale.US, clipSeconds)} ")
-            append("decode_mode=${decoded?.decodeMode ?: "not_started"} ")
-            append("source_bytes=${decoded?.sourceBytes ?: 0} ")
-            append("open_ms=${decoded?.openMs ?: -1} ")
+            append("prepare_mode=$preparationMode ")
+            append("source_bytes=$sourceBytes ")
+            append("open_ms=$openMs ")
             append("decode_ms=${decoded?.decodeMs ?: -1} ")
             append("tail_extract_ms=$tailExtractMs ")
             append("snapshot_bytes=$snapshotBytes ")
-            append("flac_bytes=$flacBytes ")
+            append("audio_format=$audioFormat ")
+            append("audio_bytes=$audioBytes ")
             append("flac_encode_ms=$flacEncodeMs ")
+            append("client_upload_ms=$clientUploadMs ")
             append("upload_body_read_ms=${serverTimings.uploadBodyReadMs} ")
             append("server_transcribe_ms=${serverTimings.serverTranscribeMs} ")
             append("server_postprocess_ms=${serverTimings.postprocessMs} ")
@@ -500,6 +640,20 @@ object ImportedAudioTailSender {
             append("whisper_round_trip_ms=$whisperRoundTripMs ")
             append("network_response_overhead_ms=$networkOverheadMs ")
             append("total_ms=$totalMs")
+        }
+    }
+
+    private fun formatBytes(bytes: Long): String {
+        if (bytes < 1024L) return "$bytes B"
+        val mib = bytes / (1024.0 * 1024.0)
+        return String.format(java.util.Locale.US, "%.1f MiB", mib)
+    }
+
+    private fun formatSeconds(seconds: Double): String {
+        return if (seconds >= 60.0) {
+            String.format(java.util.Locale.US, "%.1f min", seconds / 60.0)
+        } else {
+            String.format(java.util.Locale.US, "%.1f sec", seconds)
         }
     }
 }

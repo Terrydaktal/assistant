@@ -15,6 +15,7 @@ object AudioFlacEncoder {
     fun encodePcmFileToFlac(cacheDir: File, pcmFile: File, sampleRate: Int, channels: Int): File? {
         val format = MediaFormat.createAudioFormat("audio/flac", sampleRate, channels).apply {
             setInteger(MediaFormat.KEY_PCM_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
+            setInteger(MediaFormat.KEY_FLAC_COMPRESSION_LEVEL, 0)
         }
         val codecName = MediaCodecList(MediaCodecList.ALL_CODECS).findEncoderForFormat(format)
         if (codecName.isNullOrBlank()) {
@@ -27,6 +28,7 @@ object AudioFlacEncoder {
 
         var codec: MediaCodec? = null
         try {
+            Log.d(TAG, "Using FLAC encoder '$codecName' at compression level 0")
             codec = MediaCodec.createByCodecName(codecName)
             codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             codec.start()
@@ -78,9 +80,7 @@ object AudioFlacEncoder {
                             if (outputBuffer != null && bufferInfo.size > 0) {
                                 outputBuffer.position(bufferInfo.offset)
                                 outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
-                                val outBytes = ByteArray(bufferInfo.size)
-                                outputBuffer.get(outBytes)
-                                output.write(outBytes)
+                                while (outputBuffer.hasRemaining()) output.channel.write(outputBuffer)
                             }
                             codec.releaseOutputBuffer(outputIndex, false)
                             if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {

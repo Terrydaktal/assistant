@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_activated="true">
+        <shape android:shape="oval">
+            <gradient
+                android:angle="45"
+                android:startColor="@color/swiftsay_secondary_variant"
+                android:endColor="@color/swiftsay_primary" />
+            <stroke android:width="2dp" android:color="@color/swiftsay_secondary" />
+            <size android:width="64dp" android:height="64dp" />
+        </shape>
+    </item>
+
+    <item android:state_pressed="true">
+        <shape android:shape="oval">
+            <gradient
+                android:angle="45"
+                android:startColor="@color/swiftsay_primary_variant"
+                android:endColor="@color/swiftsay_secondary_variant" />
+            <stroke android:width="2dp" android:color="@color/swiftsay_secondary" />
+            <size android:width="64dp" android:height="64dp" />
+        </shape>
+    </item>
+
+    <item>
+        <shape android:shape="oval">
+            <gradient
+                android:angle="45"
+                android:startColor="@color/swiftsay_primary"
+                android:endColor="@color/swiftsay_secondary" />
+            <stroke android:width="2dp" android:color="@color/swiftsay_secondary_variant" />
+            <size android:width="64dp" android:height="64dp" />
+        </shape>
+    </item>
+</selector>

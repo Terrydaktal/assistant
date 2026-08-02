@@ -9,7 +9,7 @@ import androidx.core.app.NotificationCompat
 
 object NotificationHelper {
     private const val CHANNEL_ID = "earpieceai_overlay_channel"
-    private const val CHANNEL_NAME = "EarpieceAi Overlay"
+    private const val CHANNEL_NAME = "Assistant Overlay"
 
     fun createNotificationId(): Int = 1001
 
@@ -23,7 +23,7 @@ object NotificationHelper {
             nm.createNotificationChannel(channel)
         }
         val builder = NotificationCompat.Builder(ctx, CHANNEL_ID)
-            .setContentTitle("Earpiece AI voice control")
+            .setContentTitle("Assistant voice control")
             .setContentText(status)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setOngoing(true)

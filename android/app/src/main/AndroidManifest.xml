@@ -51,11 +51,18 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".ImportedAudioActivity"
+            android:exported="false"
+            android:label="Recording transcription"
+            android:screenOrientation="portrait"
+            android:theme="@style/Theme.EarpieceAi" />
+
         <!-- API Configuration Activity -->
         <activity
             android:name=".ServerConfigActivity"
             android:exported="false"
-            android:label="Earpiece AI Settings"
+            android:label="Assistant Settings"
             android:screenOrientation="portrait"
             android:theme="@style/Theme.EarpieceAi">
         </activity>
@@ -80,7 +87,7 @@
             android:name=".TextPasterAccessibilityService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
             android:exported="true"
-            android:label="EarpieceAi Text Paster">
+            android:label="Assistant Text Paster">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
             </intent-filter>

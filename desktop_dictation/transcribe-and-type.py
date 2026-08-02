@@ -12,8 +12,12 @@ import urllib.request
 WHISPER_SERVER_URL = os.environ.get(
     "WHISPER_SERVER_URL", "http://127.0.0.1:5001/transcribe_raw"
 )
-CLIENT_EVENT_URL = os.environ.get(
-    "WHISPER_CLIENT_EVENT_URL", WHISPER_SERVER_URL.rsplit("/", 1)[0] + "/client-event"
+DELIVERY_REPORT_URL = os.environ.get(
+    "WHISPER_DELIVERY_REPORT_URL",
+    os.environ.get(
+        "WHISPER_CLIENT_EVENT_URL",
+        WHISPER_SERVER_URL.rsplit("/", 1)[0] + "/desktop-delivery-report",
+    ),
 )
 TYPE_HELPER = Path(__file__).with_name("wayland-type-helper.sh")
 
@@ -23,10 +27,10 @@ def log(message: str, *, error: bool = False) -> None:
     print(f"[{timestamp}] {message}", file=sys.stderr if error else sys.stdout, flush=True)
 
 
-def report_client_event(event: str, details: str) -> None:
-    body = json.dumps({"event": event, "details": details}).encode()
+def report_delivery(status: str, details: str) -> None:
+    body = json.dumps({"status": status, "details": details}).encode()
     request = urllib.request.Request(
-        CLIENT_EVENT_URL,
+        DELIVERY_REPORT_URL,
         data=body,
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -35,7 +39,7 @@ def report_client_event(event: str, details: str) -> None:
         with urllib.request.urlopen(request, timeout=5):
             pass
     except Exception as exc:
-        log(f"Could not report client event {event!r}: {exc}", error=True)
+        log(f"Could not report desktop delivery status {status!r}: {exc}", error=True)
 
 
 def read_recording_metadata(audio_path: Path) -> dict:
@@ -160,30 +164,25 @@ def type_text(text: str) -> tuple[int, bool, str]:
 def format_delivery_timing(
     timings: dict[str, int], stop_requested_ms: int, type_ms: int
 ) -> str:
-    stop_to_type_ms = (
+    total_ms = (
         max(0, round(time.time() * 1000) - stop_requested_ms)
         if stop_requested_ms >= 0
         else -1
     )
-    components = [
-        f"client_stop_to_upload_ms={timings.get('client_stop_to_upload_ms', -1)}",
-        f"whisper_round_trip_ms={timings.get('whisper_round_trip_ms', -1)}",
-        f"client_paste_ms={type_ms}",
-    ]
-    component_values = [
-        timings.get("client_stop_to_upload_ms", -1),
-        timings.get("whisper_round_trip_ms", -1),
-        type_ms,
-    ]
-    breakdown = ""
-    if stop_to_type_ms >= 0 and all(value >= 0 for value in component_values):
-        timing_delta = stop_to_type_ms - sum(component_values)
-        if timing_delta:
-            components.append(f"client_delivery_delta_ms={timing_delta}")
-        breakdown = f" ({' + '.join(components)})"
-    if breakdown:
-        return f"client_total_ms={stop_to_type_ms}{breakdown}"
-    return f"client_paste_ms={type_ms} client_total_ms={stop_to_type_ms}"
+    stop_to_upload_ms = timings.get("client_stop_to_upload_ms", -1)
+    server_total_ms = timings.get("server_total_ms", -1)
+    measured_values = (stop_to_upload_ms, server_total_ms, type_ms)
+    if total_ms >= 0 and all(value >= 0 for value in measured_values):
+        client_overhead_ms = total_ms - sum(measured_values)
+        if client_overhead_ms >= 0:
+            return (
+                f"total_ms={total_ms} "
+                f"(client_stop_to_upload_ms={stop_to_upload_ms} + "
+                "client_network_and_delivery_overhead_ms="
+                f"{client_overhead_ms} + server_total_ms={server_total_ms} + "
+                f"client_paste_ms={type_ms})"
+            )
+    return f"total_ms={total_ms} client_paste_ms={type_ms}"
 
 
 def main() -> int:
@@ -201,8 +200,8 @@ def main() -> int:
             if refusal_reason:
                 delivery_details += f" refusal_reason={refusal_reason}"
             log(f"Desktop delivery timing {delivery_details}")
-            report_client_event(
-                "desktop-delivery-complete" if inserted else "desktop-delivery-refused",
+            report_delivery(
+                "complete" if inserted else "refused",
                 delivery_details,
             )
         else:

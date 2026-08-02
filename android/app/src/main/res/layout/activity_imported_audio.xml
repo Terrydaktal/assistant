@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/earpieceai_gradient_background"
+    android:fillViewport="true"
+    android:fitsSystemWindows="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_horizontal"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            android:text="Recording transcription"
+            android:textColor="@color/earpieceai_on_background"
+            android:textSize="24sp"
+            android:textStyle="bold" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/imported_audio_back_button"
+            style="@style/Widget.EarpieceAi.Button.Secondary"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            android:text="Back to Assistant" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            android:background="@drawable/earpieceai_card_background"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Choose recording"
+                android:textColor="@color/earpieceai_on_surface"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/imported_server_value"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="Whisper server"
+                android:textColor="@color/earpieceai_hint"
+                android:textSize="13sp" />
+
+            <TextView
+                android:id="@+id/selected_audio_value"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:text="No file selected"
+                android:textColor="@color/earpieceai_on_surface"
+                android:textIsSelectable="true"
+                android:textSize="14sp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/select_audio_button"
+                style="@style/Widget.EarpieceAi.Button.Secondary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Choose audio recording" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/select_latest_recording_button"
+                style="@style/Widget.EarpieceAi.Button.Secondary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Choose latest recording" />
+
+            <com.google.android.material.textfield.TextInputLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp">
+
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/imported_tail_seconds_input"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:hint="Seconds from end (for example 30 or 3600)"
+                    android:inputType="number" />
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/send_imported_audio_button"
+                style="@style/Widget.EarpieceAi.Button.Primary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:text="Transcribe selected tail" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            android:background="@drawable/earpieceai_card_background"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Live progress and timing"
+                android:textColor="@color/earpieceai_on_surface"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="Each stage appears here while the request is running. Elapsed time starts when you tap Transcribe."
+                android:textColor="@color/earpieceai_hint"
+                android:textSize="13sp" />
+
+            <TextView
+                android:id="@+id/imported_progress_value"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:background="@color/earpieceai_surface_variant"
+                android:padding="12dp"
+                android:text="No recording request yet."
+                android:textColor="@color/earpieceai_on_surface"
+                android:textIsSelectable="true"
+                android:textSize="13sp"
+                android:typeface="monospace" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            android:background="@drawable/earpieceai_card_background"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Transcription result"
+                android:textColor="@color/earpieceai_on_surface"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/imported_result_value"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:background="@color/earpieceai_surface_variant"
+                android:padding="12dp"
+                android:text="The transcription and final send-to-clipboard time will appear here."
+                android:textColor="@color/earpieceai_on_surface"
+                android:textIsSelectable="true"
+                android:textSize="13sp" />
+        </LinearLayout>
+    </LinearLayout>
+</ScrollView>
