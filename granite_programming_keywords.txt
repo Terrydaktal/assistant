@@ -1,0 +1,23 @@
+origin/main
+D89FD01
+CopyQ
+Fish
+Firefox
+KDE
+launcher
+UDEV
+NVIDIA
+environment
+ASRock
+NCT6683
+DKMS
+xbindkeys
+modprobe
+worktree
+worktrees
+shfmt
+staged diff
+ShellCheck
+SC2088
+tilde
+bootstrap.sh

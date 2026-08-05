@@ -35,8 +35,9 @@ Desktop dictation is included locally and shares the persistent Whisper service 
 Loads a selectable transcription backend into memory.
 - **Input:** POST request with binary audio payload at `/transcribe_raw`.
 - **Output:** JSON containing `{"text": "...", "backend": "...", "model": "..."}` plus variant-conversion metadata when enabled.
-- **Backends:** `faster-whisper` by default, or `nvidia/canary-qwen-2.5b` when started with the Canary backend.
+- **Backends:** `faster-whisper` by default, `nvidia/canary-qwen-2.5b` with the Canary backend, `nvidia/parakeet-tdt-0.6b-v2` with the Parakeet backend, or IBM's `granite-speech-4.1-2b-GGUF:Q8_0` with the Granite Speech backend.
 - **Optional post-processing:** deterministic English variant conversion (for example `en_US -> en_GB`) using the Trelis English Variant Converter library.
+- **Diagnostic retention:** keeps the five most recent request recordings as `latest_request.wav` plus four numbered history slots and keeps up to 20 timestamped failed request/error pairs in `.transcription_recovery`. Set `--recovery-request-limit` or `WHISPER_RECOVERY_REQUEST_LIMIT`, and `--failed-recovery-limit` or `WHISPER_FAILED_RECOVERY_LIMIT`, to change the limits; `0` disables that category.
 
 ### 2. `voice_bridge.js` (Web Server & Puppeteer Automator)
 Connects to your active Chromium browser (remote-debugging on port `9233`) and acts as the broker between the phone and Google AI Mode.
@@ -83,6 +84,54 @@ cd ~/Dev/assistant
 uv sync --extra canary
 uv run python whisper_service.py --backend canary-qwen --model nvidia/canary-qwen-2.5b
 ```
+Or start it with Parakeet TDT 0.6B v2:
+```bash
+cd ~/Dev/assistant
+uv sync --extra parakeet
+uv run python whisper_service.py --backend parakeet --model nvidia/parakeet-tdt-0.6b-v2
+```
+Or start it with Granite Speech 4.1 2B:
+```bash
+cd ~/Dev/assistant
+pkexec pacman -S --needed llama-cpp
+uv sync --extra granite-speech
+uv run python whisper_service.py \
+  --backend granite-speech \
+  --device cuda
+```
+Granite Speech defaults to IBM's official `ibm-granite/granite-speech-4.1-2b-GGUF:Q8_0` model, whose quantized weights are approximately 1.96 GB. The service starts a private persistent llama-server on `127.0.0.1:9797`, automatically offloads the maximum safe number of model layers to the GPU, uses the model's trained 4096-token context, waits up to five minutes for the first download/load, and terminates the managed server during shutdown. Every recording is converted to channel 0, mono 16 kHz PCM16 WAV before it is streamed to `/v1/audio/transcriptions`. Requests explicitly use temperature `0`, a 512-token output guard, and IBM's punctuation/capitalization prompt with the canonical entries from `granite_programming_keywords.txt` appended as `Keywords: ...`. Granite keyword prompt adaptation is separate from Parakeet's uppercase `programming_phrases.txt` NeMo boosting tree. Use `--key-phrases-file` to replace the Granite keyword file, `--no-key-phrases` to disable it, `--granite-prompt` to replace the instruction, and `--granite-max-new-tokens` or `--granite-temperature` to override deterministic generation controls. Internal runtime controls include `--granite-server-binary`, `--granite-server-host`, `--granite-server-port`, `--granite-server-startup-timeout`, `--granite-request-timeout`, and `--granite-context-size`.
+
+With llama.cpp build `b10221`, direct raw, punctuation, and punctuation-plus-keywords tests confirmed that the multipart prompt reaches Granite and affects technical-token casing, but the Q8 GGUF path still returned no sentence punctuation and keyword prompting alone did not reliably canonicalize every identifier. The wrapper therefore applies only curated deterministic technical normalization after Granite; it does not invent general sentence punctuation. The CUDA backend also reports unsupported speech-projector unary operations and falls those operations back internally, although the language model remains GPU-offloaded.
+Parakeet supports four presets. The programming preset is the default and is intended for push-to-talk recordings. The `rustly-pocket-conversation` preset enables Silero VAD with 250 ms minimum speech, 600 ms minimum silence, 450 ms padding, 25-second segments, two-second forced-split overlap, word timestamps, and word confidence. Both use `greedy_batch`. The primary `accuracy` preset uses `greedy_batch`, label looping, CUDA graph decoding, the repository `programming_phrases.txt` vocabulary at boosting alpha `0.5`, Silero VAD at threshold `0.30`, 150 ms minimum speech, 700 ms minimum silence, 400 ms speech padding, word timestamps, and word confidence. Accuracy VAD trims the request once from the first padded speech onset through the last padded speech offset, preserves every internal pause, and sends up to 120 seconds through one uninterrupted inference with no forced overlap. Longer requests are split into non-overlapping 120-second ranges. `accuracy-beam-experimental` uses the same input segmentation while preserving beam-5 `malsd_batch` with CUDA graphs for A/B testing. All presets use 16 kHz mono lossless input, BF16 on supported CUDA hardware with FP16 fallback, ten symbols per step, and batch size 1. Parakeet is converted to its inference dtype on CPU before one transfer to CUDA. The persistent service retains unused CUDA allocations between successful requests and releases them after an OOM; startup still releases temporary loading allocations. The uv environment pins PyTorch and Torchaudio 2.11 to CUDA 12.8, cuDNN 9.19, and cuBLAS 12.8 so NeMo and faster-whisper do not load conflicting CUDA 12 and CUDA 13 sublibraries. VAD reads lossless audio through SoundFile rather than TorchCodec. Use `--channel-selector 1` when the second source channel is the clearer one; the presets otherwise select channel 0 instead of averaging.
+
+Every backend now passes through the same technical canonicalizer after raw ASR. Canonical filenames, paths, hashes, command-line options, and curated repository terms are masked while optional US-to-UK conversion runs, then restored exactly. This prevents ordinary spelling conversion from changing protected technical identifiers. Granite Q8 still receives its prompt keywords, but direct G1/G2/G3 and `llama-cli` testing with llama.cpp build `b10221` found that punctuation and keyword prompt modes did not affect this recording's raw output; canonical Granite identifiers observed through the service are therefore produced by deterministic post-processing rather than assumed model keyword adaptation.
+
+Programming preset command:
+```bash
+cd ~/Dev/assistant
+uv sync --extra parakeet
+uv run python whisper_service.py \
+  --backend parakeet \
+  --preset programming \
+  --model nvidia/parakeet-tdt-0.6b-v2 \
+  --device cuda
+```
+Programming phrase boosting is configured at alpha `1.5` and uses context score `1.0` and depth scaling `2.0`. To activate it, add `--key-phrases-file /path/to/capitalized-phrases.txt`; the file must contain one capitalized phrase per line. The accuracy presets automatically use `programming_phrases.txt`; override it with `--key-phrases-file`, or disable it with `--no-key-phrases` for an unboosted A/B test. The conversation preset leaves phrase boosting disabled by default. Presets can also be selected with `WHISPER_PRESET`, and the phrase file and channel selector can be set with `WHISPER_KEY_PHRASES_FILE` and `WHISPER_CHANNEL_SELECTOR`.
+
+Accuracy preset command:
+```bash
+cd ~/Dev/assistant
+uv sync --extra parakeet
+uv run python whisper_service.py \
+  --backend parakeet \
+  --preset accuracy \
+  --model nvidia/parakeet-tdt-0.6b-v2 \
+  --device cuda \
+  --variant-conversion \
+  --variant-source en_US \
+  --variant-target en_GB
+```
+Use `--preset accuracy-beam-experimental` with the same command to compare the beam-5 decoder against the primary greedy accuracy path.
 To force British spellings from a US-biased Whisper transcript:
 ```bash
 cd ~/Dev/assistant
