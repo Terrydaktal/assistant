@@ -233,6 +233,14 @@ canary = [
     { name = "torch" },
     { name = "torchaudio" },
 ]
+consensus = [
+    { name = "nemo-toolkit", extra = ["asr"] },
+    { name = "rapidfuzz" },
+    { name = "silero-vad" },
+    { name = "soundfile" },
+    { name = "torch" },
+    { name = "torchaudio" },
+]
 granite-speech = [
     { name = "httpx" },
 ]
@@ -251,19 +259,25 @@ requires-dist = [
     { name = "faster-whisper", specifier = ">=1.2.1" },
     { name = "httpx", marker = "extra == 'granite-speech'", specifier = ">=0.28.1" },
     { name = "nemo-toolkit", extras = ["asr"], marker = "extra == 'canary'" },
+    { name = "nemo-toolkit", extras = ["asr"], marker = "extra == 'consensus'", specifier = ">=2.7.3" },
     { name = "nemo-toolkit", extras = ["asr"], marker = "extra == 'parakeet'" },
     { name = "nvidia-cublas-cu12", specifier = "==12.8.4.1" },
     { name = "nvidia-cudnn-cu12", specifier = "==9.19.0.56" },
     { name = "python-multipart", specifier = ">=0.0.32" },
+    { name = "rapidfuzz", marker = "extra == 'consensus'", specifier = ">=3.14.3" },
+    { name = "silero-vad", marker = "extra == 'consensus'", specifier = ">=6.2.1" },
     { name = "silero-vad", marker = "extra == 'parakeet'", specifier = ">=6.2.1" },
+    { name = "soundfile", marker = "extra == 'consensus'", specifier = ">=0.14.0" },
     { name = "soundfile", marker = "extra == 'parakeet'", specifier = ">=0.14.0" },
     { name = "torch", marker = "extra == 'canary'", specifier = "==2.11.0", index = "https://download.pytorch.org/whl/cu128" },
+    { name = "torch", marker = "extra == 'consensus'", specifier = "==2.11.0", index = "https://download.pytorch.org/whl/cu128" },
     { name = "torch", marker = "extra == 'parakeet'", specifier = "==2.11.0", index = "https://download.pytorch.org/whl/cu128" },
     { name = "torchaudio", marker = "extra == 'canary'", specifier = "==2.11.0", index = "https://download.pytorch.org/whl/cu128" },
+    { name = "torchaudio", marker = "extra == 'consensus'", specifier = "==2.11.0", index = "https://download.pytorch.org/whl/cu128" },
     { name = "torchaudio", marker = "extra == 'parakeet'", specifier = "==2.11.0", index = "https://download.pytorch.org/whl/cu128" },
     { name = "uvicorn", specifier = ">=0.49.0" },
 ]
-provides-extras = ["canary", "parakeet", "granite-speech"]
+provides-extras = ["canary", "parakeet", "granite-speech", "consensus"]
 
 [[package]]
 name = "asttokens"

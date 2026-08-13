@@ -10,10 +10,10 @@ from unittest.mock import Mock, patch
 
 from whisper_service import (
     ANSI_BREAKDOWN_VALUE,
-    FriendlyLogSource,
-    FasterWhisperTranscriber,
-    GraniteSpeechTranscriber,
     PARAKEET_PRESETS,
+    FasterWhisperTranscriber,
+    FriendlyLogSource,
+    GraniteSpeechTranscriber,
     ParakeetTranscriber,
     app,
     build_log_config,
@@ -25,12 +25,13 @@ from whisper_service import (
     format_audio_size,
     format_client_preparation,
     format_timing_fields,
+    load_whisper_hotwords,
     normalize_technical_text,
     parse_parakeet_channel_selector,
-    preserve_keyword_casing,
     prepare_granite_audio,
-    protect_technical_terms,
     preserve_failed_request,
+    preserve_keyword_casing,
+    protect_technical_terms,
     restore_technical_terms,
     write_recovery_copy,
 )
@@ -45,6 +46,8 @@ class FasterWhisperBatchingTests(unittest.TestCase):
             batch_threshold_seconds=60.0,
             language="en",
             beam_size=4,
+            patience=1.0,
+            length_penalty=1.05,
             vad_filter=True,
             vad_threshold=0.3,
             vad_min_silence_ms=1000,
@@ -53,6 +56,7 @@ class FasterWhisperBatchingTests(unittest.TestCase):
             no_speech_threshold=0.3,
             compression_ratio_threshold=2.4,
             initial_prompt="",
+            hotwords="SQLAlchemy, Pydantic",
             cpu_fallback_enabled=True,
         )
         transcriber.model = object()
@@ -64,6 +68,19 @@ class FasterWhisperBatchingTests(unittest.TestCase):
         transcriber._invalidate_primary_model = Mock()
         transcriber._get_cpu_fallback_model = Mock(return_value="cpu-model")
         return transcriber
+
+    def test_transcription_options_pass_hotwords_to_both_whisper_paths(self):
+        options = self.make_transcriber()._transcription_options()
+
+        self.assertEqual(options["hotwords"], "SQLAlchemy, Pydantic")
+        self.assertEqual(options["patience"], 1.0)
+        self.assertEqual(options["length_penalty"], 1.05)
+
+    def test_long_audio_defaults_to_accuracy_validated_batch_size_two(self):
+        with patch.dict(os.environ, {}, clear=True):
+            config = build_runtime_config()
+
+        self.assertEqual(config.long_audio_batch_size, 2)
 
     def test_long_audio_uses_batched_gpu(self):
         transcriber = self.make_transcriber()
@@ -132,6 +149,34 @@ class FasterWhisperBatchingTests(unittest.TestCase):
                 1.5,
                 places=2,
             )
+
+    def test_segment_metadata_is_retained_for_adaptive_consensus(self):
+        transcriber = FasterWhisperTranscriber.__new__(FasterWhisperTranscriber)
+        segments = [
+            SimpleNamespace(
+                start=1.0,
+                end=2.5,
+                text=" Hello world.",
+                avg_logprob=-0.25,
+                compression_ratio=1.1,
+                no_speech_prob=0.02,
+            )
+        ]
+
+        self.assertEqual(transcriber._consume_segments(segments), "Hello world.")
+        self.assertEqual(
+            transcriber.last_segment_metadata,
+            [
+                {
+                    "start": 1.0,
+                    "end": 2.5,
+                    "text": " Hello world.",
+                    "avg_logprob": -0.25,
+                    "compression_ratio": 1.1,
+                    "no_speech_prob": 0.02,
+                }
+            ],
+        )
 
 
 class ParakeetBackendTests(unittest.TestCase):
@@ -237,6 +282,31 @@ class ParakeetBackendTests(unittest.TestCase):
         self.assertEqual(parse_parakeet_channel_selector("1", 0), 1)
         self.assertEqual(parse_parakeet_channel_selector("average", 0), "average")
         self.assertIsNone(parse_parakeet_channel_selector("none", 0))
+
+    def test_whisper_hotwords_combine_inline_and_file_entries(self):
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as hotwords_file:
+            hotwords_file.write("Pydantic\n# ignored\nSQLAlchemy\n")
+            hotwords_file.flush()
+
+            hotwords = load_whisper_hotwords(
+                "SQLAlchemy, async/await",
+                hotwords_file.name,
+            )
+
+        self.assertEqual(hotwords, "SQLAlchemy, async/await, Pydantic")
+
+    def test_whisper_hotwords_can_be_loaded_from_environment_file(self):
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as hotwords_file:
+            hotwords_file.write("SQLAlchemy\nPydantic\n")
+            hotwords_file.flush()
+            with patch.dict(
+                os.environ,
+                {"WHISPER_HOTWORDS_FILE": hotwords_file.name},
+                clear=True,
+            ):
+                config = build_runtime_config()
+
+        self.assertEqual(config.hotwords, "SQLAlchemy, Pydantic")
 
     def test_parakeet_backend_can_be_selected_from_environment(self):
         with patch.dict(os.environ, {"WHISPER_BACKEND": "parakeet"}, clear=True):

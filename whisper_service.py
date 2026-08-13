@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import wave
@@ -194,6 +195,8 @@ DEFAULT_FASTER_WHISPER_MODEL = "large-v3"
 DEFAULT_CANARY_MODEL = "nvidia/canary-qwen-2.5b"
 DEFAULT_PARAKEET_MODEL = "nvidia/parakeet-tdt-0.6b-v2"
 DEFAULT_GRANITE_SPEECH_MODEL = "ibm-granite/granite-speech-4.1-2b-GGUF:Q8_0"
+DEFAULT_CONSENSUS_MODEL = "large-v3+cohere-transcribe-03-2026+parakeet-tdt-0.6b-v2"
+DEFAULT_ADAPTIVE_CONSENSUS_MODEL = f"{DEFAULT_CONSENSUS_MODEL}-adaptive"
 DEFAULT_GRANITE_PROMPT = "transcribe the speech with proper punctuation and capitalization."
 DEFAULT_PROGRAMMING_PHRASES_FILE = Path(__file__).with_name("programming_phrases.txt")
 DEFAULT_GRANITE_KEYWORDS_FILE = Path(__file__).with_name("granite_programming_keywords.txt")
@@ -481,6 +484,8 @@ class RuntimeConfig:
     compute_type: str
     language: str
     beam_size: int
+    patience: float
+    length_penalty: float
     vad_filter: bool
     vad_threshold: float
     vad_min_silence_ms: int
@@ -489,6 +494,7 @@ class RuntimeConfig:
     no_speech_threshold: float
     compression_ratio_threshold: float
     initial_prompt: str
+    hotwords: str
     batch_threshold_seconds: float
     long_audio_batch_size: int
     cpu_fallback_enabled: bool
@@ -516,9 +522,11 @@ class FasterWhisperTranscriber:
         self._batched_pipeline = None
         self._cpu_fallback_model = None
         self._gpu_model_needs_reload = False
+        self.last_segment_metadata: list[dict[str, object]] = []
         self._load_primary_model()
 
     def transcribe_file(self, audio_path: str) -> str:
+        self.last_segment_metadata = []
         primary_model = self._get_primary_model()
         duration_seconds = self._audio_duration_seconds(audio_path)
         use_batched = (
@@ -567,6 +575,8 @@ class FasterWhisperTranscriber:
             "word_timestamps": False,
             "language": self.config.language,
             "beam_size": self.config.beam_size,
+            "patience": self.config.patience,
+            "length_penalty": self.config.length_penalty,
             "vad_filter": self.config.vad_filter,
             "vad_parameters": {
                 "threshold": self.config.vad_threshold,
@@ -577,11 +587,12 @@ class FasterWhisperTranscriber:
             "no_speech_threshold": self.config.no_speech_threshold,
             "compression_ratio_threshold": self.config.compression_ratio_threshold,
             "initial_prompt": self.config.initial_prompt or None,
+            "hotwords": self.config.hotwords or None,
         }
 
     def _transcribe_with_model(self, model, audio_path: str) -> str:
         segments, _info = model.transcribe(audio_path, **self._transcription_options())
-        return "".join(segment.text for segment in segments).strip()
+        return self._consume_segments(segments)
 
     def _transcribe_batched(self, primary_model, audio_path: str) -> str:
         if self._batched_pipeline is None:
@@ -591,7 +602,26 @@ class FasterWhisperTranscriber:
             batch_size=self.config.long_audio_batch_size,
             **self._transcription_options(),
         )
-        return "".join(segment.text for segment in segments).strip()
+        return self._consume_segments(segments)
+
+    def _consume_segments(self, segments) -> str:
+        text_parts: list[str] = []
+        metadata: list[dict[str, object]] = []
+        for segment in segments:
+            text = str(segment.text)
+            text_parts.append(text)
+            metadata.append(
+                {
+                    "start": float(segment.start),
+                    "end": float(segment.end),
+                    "text": text,
+                    "avg_logprob": float(segment.avg_logprob),
+                    "compression_ratio": float(segment.compression_ratio),
+                    "no_speech_prob": float(segment.no_speech_prob),
+                }
+            )
+        self.last_segment_metadata = metadata
+        return "".join(text_parts).strip()
 
     def _audio_duration_seconds(self, audio_path: str) -> float | None:
         try:
@@ -1332,7 +1362,7 @@ class GraniteSpeechTranscriber:
         if binary is None:
             raise RuntimeError(
                 f"Granite Speech Q8 requires '{self.config.granite_server_binary}'. "
-                "Install the CachyOS package with `pkexec pacman -S llama-cpp`."
+                "Install the CachyOS package with `sudo pacman -S llama-cpp`."
             )
         command = self._server_command(binary)
         print(
@@ -1403,6 +1433,301 @@ class GraniteSpeechTranscriber:
             client.close()
 
 
+class ConsensusTranscriber:
+    """Run three isolated recognizers sequentially and majority-vote their output."""
+
+    def __init__(self, config: RuntimeConfig) -> None:
+        if not config.device.startswith("cuda"):
+            raise RuntimeError("The validated consensus backend requires a CUDA device.")
+
+        from transcription_consensus import merge_transcripts
+
+        self.config = config
+        self.merge_transcripts = merge_transcripts
+        self.project_dir = Path(__file__).resolve().parent
+        self.worker_path = self.project_dir / "consensus_worker.py"
+        self.cohere_worker_path = self.project_dir / "consensus_cohere" / "transcribe.py"
+        configured_python = os.environ.get("ASSISTANT_CONSENSUS_COHERE_PYTHON")
+        self.cohere_python = Path(configured_python) if configured_python else (
+            self.project_dir / "consensus_cohere" / ".venv" / "bin" / "python"
+        )
+        if not self.cohere_python.is_file():
+            raise RuntimeError(
+                "The consensus Cohere environment is missing. Run "
+                "`UV_CACHE_DIR=/data/.cache/uv uv sync --project consensus_cohere`."
+            )
+        print(
+            "Consensus backend ready: fixed sequential voters are faster-whisper "
+            "large-v3, Cohere Transcribe BF16, and Parakeet TDT 0.6B v2."
+        )
+
+    def transcribe_file(self, audio_path: str) -> str:
+        transcripts = [
+            self._run_project_worker("faster-whisper", audio_path),
+            self._run_cohere_worker(audio_path),
+            self._run_project_worker("parakeet", audio_path),
+        ]
+        started = time.perf_counter()
+        text = self.merge_transcripts(transcripts)
+        print(
+            "Consensus ROVER merge complete: "
+            f"elapsed_ms={round((time.perf_counter() - started) * 1000)} "
+            f"output_words={len(text.split())}"
+        )
+        return text
+
+    def _run_project_worker(self, backend: str, audio_path: str) -> str:
+        payload = self._run_project_worker_payload(backend, audio_path)
+        text = payload.get("text")
+        if not isinstance(text, str):
+            raise RuntimeError(f"Consensus voter '{backend}' returned no transcript text.")
+        return text
+
+    def _run_project_worker_payload(
+        self,
+        backend: str,
+        audio_path: str,
+    ) -> dict[str, object]:
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "PYTHONUNBUFFERED": "1",
+                "WHISPER_BACKEND": backend,
+                "WHISPER_DEVICE": "cuda",
+                "WHISPER_LANGUAGE": "en",
+                "WHISPER_VARIANT_CONVERSION": "false",
+            }
+        )
+        if backend == "faster-whisper":
+            environment.update(
+                {
+                    "WHISPER_MODEL": DEFAULT_FASTER_WHISPER_MODEL,
+                    "WHISPER_COMPUTE_TYPE": "float16",
+                    "WHISPER_BEAM_SIZE": "4",
+                    "WHISPER_PATIENCE": "1.0",
+                    "WHISPER_LENGTH_PENALTY": "1.0",
+                    "WHISPER_VAD_FILTER": "true",
+                    "WHISPER_VAD_THRESHOLD": "0.30",
+                    "WHISPER_VAD_MIN_SILENCE_MS": "1000",
+                    "WHISPER_VAD_SPEECH_PAD_MS": "400",
+                    "WHISPER_LOG_PROB_THRESHOLD": "-1.0",
+                    "WHISPER_NO_SPEECH_THRESHOLD": "0.3",
+                    "WHISPER_COMPRESSION_RATIO_THRESHOLD": "2.4",
+                    "WHISPER_INITIAL_PROMPT": "",
+                    "WHISPER_HOTWORDS": self.config.hotwords,
+                    "WHISPER_HOTWORDS_FILE": "",
+                    "WHISPER_BATCH_THRESHOLD_SECONDS": "60",
+                    "WHISPER_LONG_AUDIO_BATCH_SIZE": str(
+                        self.config.long_audio_batch_size
+                    ),
+                    "WHISPER_CPU_FALLBACK": str(
+                        self.config.cpu_fallback_enabled
+                    ).lower(),
+                    "WHISPER_CPU_FALLBACK_COMPUTE_TYPE": (
+                        self.config.cpu_fallback_compute_type
+                    ),
+                    "WHISPER_CPU_FALLBACK_CPU_THREADS": str(
+                        self.config.cpu_fallback_cpu_threads
+                    ),
+                }
+            )
+        else:
+            environment.update(
+                {
+                    "WHISPER_MODEL": DEFAULT_PARAKEET_MODEL,
+                    "WHISPER_PRESET": "accuracy",
+                    "WHISPER_KEY_PHRASES_FILE": "",
+                    "WHISPER_CHANNEL_SELECTOR": "0",
+                }
+            )
+        return self._run_worker_payload(
+            backend,
+            [
+                sys.executable,
+                str(self.worker_path),
+                "--backend",
+                backend,
+                "--input",
+                audio_path,
+            ],
+            environment,
+        )
+
+    def _run_cohere_worker(self, audio_path: str) -> str:
+        return self._run_worker(
+            "cohere",
+            [
+                str(self.cohere_python),
+                str(self.cohere_worker_path),
+                "--input",
+                audio_path,
+            ],
+            os.environ.copy(),
+        )
+
+    def _run_cohere_regions_worker(
+        self,
+        audio_path: str,
+        regions,
+    ) -> list[str]:
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as region_file:
+            region_path = Path(region_file.name)
+        region_path.write_text(
+            json.dumps(
+                [
+                    {
+                        "start": region.start,
+                        "end": region.end,
+                    }
+                    for region in regions
+                ]
+            ),
+            encoding="utf-8",
+        )
+        try:
+            payload = self._run_worker_payload(
+                "cohere-regions",
+                [
+                    str(self.cohere_python),
+                    str(self.cohere_worker_path),
+                    "--input",
+                    audio_path,
+                    "--regions-file",
+                    str(region_path),
+                ],
+                os.environ.copy(),
+            )
+        finally:
+            region_path.unlink(missing_ok=True)
+
+        results = payload.get("regions")
+        if not isinstance(results, list) or len(results) != len(regions):
+            raise RuntimeError("Cohere returned an invalid adaptive-region result.")
+        texts = [result.get("text") if isinstance(result, dict) else None for result in results]
+        if any(not isinstance(text, str) for text in texts):
+            raise RuntimeError("Cohere omitted an adaptive-region transcript.")
+        return texts
+
+    @staticmethod
+    def _run_worker(
+        name: str,
+        command: list[str],
+        environment: dict[str, str],
+    ) -> str:
+        payload = ConsensusTranscriber._run_worker_payload(name, command, environment)
+        text = payload.get("text")
+        if not isinstance(text, str):
+            raise RuntimeError(f"Consensus voter '{name}' returned no transcript text.")
+        return text
+
+    @staticmethod
+    def _run_worker_payload(
+        name: str,
+        command: list[str],
+        environment: dict[str, str],
+    ) -> dict[str, object]:
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as result_file:
+            result_path = Path(result_file.name)
+        full_command = [*command, "--output", str(result_path)]
+        started = time.perf_counter()
+        print(f"Consensus voter started: backend={name}")
+        try:
+            subprocess.run(full_command, check=True, env=environment)
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Consensus voter '{name}' failed: {exc}") from exc
+        finally:
+            result_path.unlink(missing_ok=True)
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"Consensus voter '{name}' returned an invalid result.")
+        text = payload.get("text", "")
+        if not isinstance(text, str):
+            raise RuntimeError(f"Consensus voter '{name}' returned an invalid result.")
+        print(
+            "Consensus voter complete: "
+            f"backend={name} elapsed_ms={round((time.perf_counter() - started) * 1000)} "
+            f"words={len(text.split())}"
+        )
+        return payload
+
+
+class AdaptiveConsensusTranscriber(ConsensusTranscriber):
+    """Adjudicate only Whisper/Parakeet disagreement regions with Cohere."""
+
+    def __init__(self, config: RuntimeConfig) -> None:
+        super().__init__(config)
+        from transcription_consensus import (
+            find_disagreement_regions,
+            merge_adaptive_transcripts,
+        )
+
+        self.find_disagreement_regions = find_disagreement_regions
+        self.merge_adaptive_transcripts = merge_adaptive_transcripts
+        self.context_seconds = 1.0
+        print(
+            "Adaptive consensus enabled: Cohere receives only Whisper/Parakeet "
+            f"disagreement regions with context_seconds={self.context_seconds:g}."
+        )
+
+    def transcribe_file(self, audio_path: str) -> str:
+        whisper_payload = self._run_project_worker_payload(
+            "faster-whisper",
+            audio_path,
+        )
+        whisper_text = whisper_payload.get("text")
+        segments = whisper_payload.get("segments")
+        if not isinstance(whisper_text, str) or not isinstance(segments, list):
+            raise RuntimeError("Whisper returned no adaptive-consensus metadata.")
+
+        parakeet_text = self._run_project_worker("parakeet", audio_path)
+        try:
+            regions = self.find_disagreement_regions(
+                whisper_text,
+                parakeet_text,
+                segments,
+                context_seconds=self.context_seconds,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            print(
+                "WARNING: Adaptive region detection failed; running full Cohere voter: "
+                f"{exc}"
+            )
+            cohere_text = self._run_cohere_worker(audio_path)
+            return self.merge_transcripts(
+                [whisper_text, cohere_text, parakeet_text]
+            )
+
+        if not regions:
+            print("Adaptive consensus skipped Cohere: first two voters agree.")
+            return whisper_text
+
+        covered_seconds = sum(region.end - region.start for region in regions)
+        duration_seconds = max(
+            (float(segment.get("end", 0.0)) for segment in segments),
+            default=0.0,
+        )
+        coverage = covered_seconds / duration_seconds if duration_seconds else 1.0
+        print(
+            "Adaptive consensus regions selected: "
+            f"regions={len(regions)} covered_seconds={covered_seconds:.2f} "
+            f"audio_coverage={coverage:.2%}"
+        )
+        adjudications = self._run_cohere_regions_worker(audio_path, regions)
+        started = time.perf_counter()
+        text = self.merge_adaptive_transcripts(
+            whisper_text,
+            parakeet_text,
+            regions,
+            adjudications,
+        )
+        print(
+            "Adaptive consensus merge complete: "
+            f"elapsed_ms={round((time.perf_counter() - started) * 1000)} "
+            f"output_words={len(text.split())}"
+        )
+        return text
+
+
 class EnglishVariantPostProcessor:
     def __init__(self, source: str, target: str) -> None:
         from english_variant_converter import convert
@@ -1429,6 +1754,10 @@ def default_model_for_backend(backend: str) -> str:
         return DEFAULT_PARAKEET_MODEL
     if backend == "granite-speech":
         return DEFAULT_GRANITE_SPEECH_MODEL
+    if backend == "consensus":
+        return DEFAULT_CONSENSUS_MODEL
+    if backend == "adaptive-consensus":
+        return DEFAULT_ADAPTIVE_CONSENSUS_MODEL
     return DEFAULT_FASTER_WHISPER_MODEL
 
 
@@ -1449,6 +1778,28 @@ def parse_parakeet_channel_selector(value: str | None, default: int | str | None
     if selector < 0:
         raise ValueError("Parakeet channel selector must be non-negative.")
     return selector
+
+
+def load_whisper_hotwords(value: str, file_name: str) -> str:
+    entries = [entry.strip() for entry in re.split(r"[,\n]", value) if entry.strip()]
+    if file_name.strip():
+        path = Path(file_name).expanduser()
+        if not path.is_file():
+            raise FileNotFoundError(f"Whisper hotwords file does not exist: {path}")
+        entries.extend(
+            line.strip()
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        )
+
+    unique_entries: list[str] = []
+    seen: set[str] = set()
+    for entry in entries:
+        key = entry.casefold()
+        if key not in seen:
+            seen.add(key)
+            unique_entries.append(entry)
+    return ", ".join(unique_entries)
 
 
 def build_runtime_config(args: argparse.Namespace | None = None) -> RuntimeConfig:
@@ -1526,6 +1877,16 @@ def build_runtime_config(args: argparse.Namespace | None = None) -> RuntimeConfi
     )
     language = (args.language if args else None) or os.environ.get("WHISPER_LANGUAGE", "en")
     beam_size_value = (args.beam_size if args else None) or os.environ.get("WHISPER_BEAM_SIZE", "4")
+    patience_value = (
+        args.patience
+        if args is not None and args.patience is not None
+        else os.environ.get("WHISPER_PATIENCE", "1.0")
+    )
+    length_penalty_value = (
+        args.length_penalty
+        if args is not None and args.length_penalty is not None
+        else os.environ.get("WHISPER_LENGTH_PENALTY", "1.0")
+    )
     vad_filter = (
         (args.vad_filter if args else None)
         if args is not None and args.vad_filter is not None
@@ -1549,6 +1910,13 @@ def build_runtime_config(args: argparse.Namespace | None = None) -> RuntimeConfi
         or os.environ.get("WHISPER_COMPRESSION_RATIO_THRESHOLD", "2.4")
     )
     initial_prompt = (args.initial_prompt if args else None) or os.environ.get("WHISPER_INITIAL_PROMPT", "")
+    hotwords_value = (getattr(args, "hotwords", None) if args else None) or os.environ.get(
+        "WHISPER_HOTWORDS", ""
+    )
+    hotwords_file = (getattr(args, "hotwords_file", None) if args else None) or os.environ.get(
+        "WHISPER_HOTWORDS_FILE", ""
+    )
+    hotwords = load_whisper_hotwords(hotwords_value, hotwords_file)
     batch_threshold_seconds_value = (
         args.batch_threshold_seconds
         if args is not None and args.batch_threshold_seconds is not None
@@ -1623,6 +1991,8 @@ def build_runtime_config(args: argparse.Namespace | None = None) -> RuntimeConfi
         compute_type=compute_type,
         language=language,
         beam_size=int(beam_size_value),
+        patience=max(1.0, float(patience_value)),
+        length_penalty=float(length_penalty_value),
         vad_filter=bool(vad_filter),
         vad_threshold=float(vad_threshold_value),
         vad_min_silence_ms=int(vad_min_silence_ms_value),
@@ -1631,6 +2001,7 @@ def build_runtime_config(args: argparse.Namespace | None = None) -> RuntimeConfi
         no_speech_threshold=float(no_speech_threshold_value),
         compression_ratio_threshold=float(compression_ratio_threshold_value),
         initial_prompt=initial_prompt,
+        hotwords=hotwords,
         batch_threshold_seconds=max(0.0, float(batch_threshold_seconds_value)),
         long_audio_batch_size=max(1, int(long_audio_batch_size_value)),
         cpu_fallback_enabled=bool(cpu_fallback_enabled),
@@ -1657,6 +2028,10 @@ def build_transcriber(config: RuntimeConfig):
         return ParakeetTranscriber(config)
     if config.backend == "granite-speech":
         return GraniteSpeechTranscriber(config)
+    if config.backend == "consensus":
+        return ConsensusTranscriber(config)
+    if config.backend == "adaptive-consensus":
+        return AdaptiveConsensusTranscriber(config)
     raise ValueError(f"Unsupported backend: {config.backend}")
 
 
@@ -2054,9 +2429,21 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the local transcription service.")
     parser.add_argument(
         "--backend",
-        choices=["faster-whisper", "canary-qwen", "parakeet", "granite-speech"],
+        choices=[
+            "faster-whisper",
+            "canary-qwen",
+            "parakeet",
+            "granite-speech",
+            "consensus",
+            "adaptive-consensus",
+        ],
         default=None,
-        help="Transcription backend. Defaults to faster-whisper.",
+        help=(
+            "Transcription backend. Consensus votes faster-whisper, Cohere, and "
+            "Parakeet over the full recording; adaptive-consensus sends only "
+            "Whisper/Parakeet disagreement regions to Cohere. Defaults to "
+            "faster-whisper."
+        ),
     )
     parser.add_argument(
         "--model",
@@ -2161,6 +2548,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--language", default=None, help="Language code for faster-whisper. Defaults to en.")
     parser.add_argument("--beam-size", type=int, default=None, help="Beam size for faster-whisper decoding.")
     parser.add_argument(
+        "--patience",
+        type=float,
+        default=None,
+        help="Beam-search patience for faster-whisper. Defaults to 1.0.",
+    )
+    parser.add_argument(
+        "--length-penalty",
+        type=float,
+        default=None,
+        help="Beam-search length penalty for faster-whisper. Defaults to 1.0.",
+    )
+    parser.add_argument(
         "--vad-filter",
         dest="vad_filter",
         action="store_true",
@@ -2208,6 +2607,22 @@ def parse_args() -> argparse.Namespace:
         "--initial-prompt",
         default=None,
         help="Optional initial prompt for names, jargon, acronyms, and spelling hints.",
+    )
+    parser.add_argument(
+        "--hotwords",
+        default=None,
+        help=(
+            "Comma-separated faster-whisper names and jargon to bias without a style "
+            "instruction. Disabled by default."
+        ),
+    )
+    parser.add_argument(
+        "--hotwords-file",
+        default=None,
+        help=(
+            "Text file containing one faster-whisper hotword or phrase per line; entries "
+            "are combined with --hotwords."
+        ),
     )
     parser.add_argument(
         "--batch-threshold-seconds",

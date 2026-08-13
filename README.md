@@ -17,6 +17,10 @@ Desktop dictation is included locally and shares the persistent Whisper service 
 ├── pyproject.toml        # Python virtual environment configuration (uv)
 ├── uv.lock               # Python lockfile
 ├── whisper_service.py    # Configurable transcription server (FastAPI)
+├── consensus_worker.py   # Isolated Whisper/Parakeet consensus voter
+├── transcription_consensus.py # Deterministic ROVER word/punctuation voting
+├── consensus_cohere/     # Isolated Transformers 5 Cohere worker project
+├── docs/                 # Reproducible benchmark results and methodology
 ├── voice_bridge.js       # Voice Router / CDP browser automator (Node.js)
 ├── desktop_dictation/    # Queued desktop recording, transcription, and safe typing
 ├── README.md             # This guide
@@ -35,7 +39,7 @@ Desktop dictation is included locally and shares the persistent Whisper service 
 Loads a selectable transcription backend into memory.
 - **Input:** POST request with binary audio payload at `/transcribe_raw`.
 - **Output:** JSON containing `{"text": "...", "backend": "...", "model": "..."}` plus variant-conversion metadata when enabled.
-- **Backends:** `faster-whisper` by default, `nvidia/canary-qwen-2.5b` with the Canary backend, `nvidia/parakeet-tdt-0.6b-v2` with the Parakeet backend, or IBM's `granite-speech-4.1-2b-GGUF:Q8_0` with the Granite Speech backend.
+- **Backends:** `faster-whisper` by default, `nvidia/canary-qwen-2.5b` with the Canary backend, `nvidia/parakeet-tdt-0.6b-v2` with the Parakeet backend, IBM's `granite-speech-4.1-2b-GGUF:Q8_0` with the Granite Speech backend, or the sequential `consensus` and disagreement-only `adaptive-consensus` modes using Whisper, Cohere, and Parakeet.
 - **Optional post-processing:** deterministic English variant conversion (for example `en_US -> en_GB`) using the Trelis English Variant Converter library.
 - **Diagnostic retention:** keeps the five most recent request recordings as `latest_request.wav` plus four numbered history slots and keeps up to 20 timestamped failed request/error pairs in `.transcription_recovery`. Set `--recovery-request-limit` or `WHISPER_RECOVERY_REQUEST_LIMIT`, and `--failed-recovery-limit` or `WHISPER_FAILED_RECOVERY_LIMIT`, to change the limits; `0` disables that category.
 
@@ -93,12 +97,23 @@ uv run python whisper_service.py --backend parakeet --model nvidia/parakeet-tdt-
 Or start it with Granite Speech 4.1 2B:
 ```bash
 cd ~/Dev/assistant
-pkexec pacman -S --needed llama-cpp
+sudo pacman -S --needed llama-cpp
 uv sync --extra granite-speech
 uv run python whisper_service.py \
   --backend granite-speech \
   --device cuda
 ```
+Or start the validated maximum-accuracy consensus backend:
+```bash
+cd ~/Dev/assistant
+UV_CACHE_DIR=/data/.cache/uv uv sync --extra consensus
+UV_CACHE_DIR=/data/.cache/uv uv sync --project consensus_cohere
+uv run python whisper_service.py --backend consensus --device cuda
+```
+The consensus backend runs three fixed voters sequentially: faster-whisper large-v3 with beam 4 and batch 2 for recordings of at least 60 seconds, Cohere Transcribe BF16 with official chunk boundaries and microbatch 1, and the unboosted Parakeet TDT 0.6B v2 `accuracy` preset with 120-second segments and no forced overlap. It then performs deterministic word and punctuation majority voting with Whisper as the tie-breaking anchor. Each voter runs in an isolated process and exits before the next starts, so VRAM is never additive. Driver-level measurements on the RTX 5060 were 4,380 MiB for Whisper, 4,348 MiB for Cohere, and 2,082 MiB for Parakeet, making the measured pipeline peak 4,380 MiB. Across four technical recordings containing 41,500 scored reference words, consensus reduced WER from 5.1518% to 4.4964%, increased punctuation micro-F1 from 0.7872 to 0.8254, and increased sentence-boundary F1 from 0.8191 to 0.8662. See `docs/asr-consensus-benchmark.md` for the full methodology and per-recording results. The Cohere checkpoint is gated; accept its Hugging Face terms and authenticate with `hf auth login` before first use. This mode favors accuracy over latency and leaves the ordinary faster-whisper backend as the interactive default.
+
+`--backend adaptive-consensus` first runs Whisper and Parakeet over the complete recording, detects their word or punctuation disagreements, and sends only those timestamped regions to Cohere. It is an optional middle ground rather than the interactive default: on the ten-minute test it improved WER from 3.0097% to 2.9126% and punctuation F1 from 0.8387 to 0.8541, but took 45.86 seconds instead of 17.22 seconds. On the 66-minute SQLAlchemy recording it recovered only six errors and took 189.06 seconds instead of 114.00 seconds. Overlapping coarse timestamp regions are merged before adjudication so every Whisper anchor range is replaced at most once.
+
 Granite Speech defaults to IBM's official `ibm-granite/granite-speech-4.1-2b-GGUF:Q8_0` model, whose quantized weights are approximately 1.96 GB. The service starts a private persistent llama-server on `127.0.0.1:9797`, automatically offloads the maximum safe number of model layers to the GPU, uses the model's trained 4096-token context, waits up to five minutes for the first download/load, and terminates the managed server during shutdown. Every recording is converted to channel 0, mono 16 kHz PCM16 WAV before it is streamed to `/v1/audio/transcriptions`. Requests explicitly use temperature `0`, a 512-token output guard, and IBM's punctuation/capitalization prompt with the canonical entries from `granite_programming_keywords.txt` appended as `Keywords: ...`. Granite keyword prompt adaptation is separate from Parakeet's uppercase `programming_phrases.txt` NeMo boosting tree. Use `--key-phrases-file` to replace the Granite keyword file, `--no-key-phrases` to disable it, `--granite-prompt` to replace the instruction, and `--granite-max-new-tokens` or `--granite-temperature` to override deterministic generation controls. Internal runtime controls include `--granite-server-binary`, `--granite-server-host`, `--granite-server-port`, `--granite-server-startup-timeout`, `--granite-request-timeout`, and `--granite-context-size`.
 
 With llama.cpp build `b10221`, direct raw, punctuation, and punctuation-plus-keywords tests confirmed that the multipart prompt reaches Granite and affects technical-token casing, but the Q8 GGUF path still returned no sentence punctuation and keyword prompting alone did not reliably canonicalize every identifier. The wrapper therefore applies only curated deterministic technical normalization after Granite; it does not invent general sentence punctuation. The CUDA backend also reports unsupported speech-projector unary operations and falls those operations back internally, although the language model remains GPU-offloaded.
@@ -141,7 +156,9 @@ uv run python whisper_service.py \
   --variant-source en_US \
   --variant-target en_GB
 ```
-For faster long recordings, audio at least 60 seconds long uses the loaded GPU model through faster-whisper's batched pipeline with batch size 2. If that attempt fails, the service retries the same file with ordinary GPU transcription before using the cached CPU fallback for a CUDA memory failure. Configure this with `--batch-threshold-seconds` and `--long-audio-batch-size`, or `WHISPER_BATCH_THRESHOLD_SECONDS` and `WHISPER_LONG_AUDIO_BATCH_SIZE`; batch size 1 disables batching.
+For long recordings, audio at least 60 seconds long uses the loaded GPU model through faster-whisper's batched pipeline with accuracy-validated batch size 2. Batch size 4 is an optional speed mode: on the RTX 5060 it peaked at 4,924 MiB and reduced aggregate processing time by about 24% across four recordings, but made three additional errors across 41,500 reference words. Enable it with `--long-audio-batch-size 4` or `WHISPER_LONG_AUDIO_BATCH_SIZE=4`; the same explicit override controls the Whisper voter in consensus modes. If a batched attempt fails, the service retries the same file with ordinary GPU transcription before using the cached CPU fallback for a CUDA memory failure. Configure the threshold with `--batch-threshold-seconds` or `WHISPER_BATCH_THRESHOLD_SECONDS`; batch size 1 disables batching.
+
+Known names and jargon can be supplied to faster-whisper with `--hotwords`, `--hotwords-file`, `WHISPER_HOTWORDS`, or `WHISPER_HOTWORDS_FILE`. Hotwords are disabled by default and should remain narrowly scoped: on the retained technical excerpt, both an 11-term list and a focused three-term list increased WER. Beam-search `--patience` and `--length-penalty` are also configurable through `WHISPER_PATIENCE` and `WHISPER_LENGTH_PENALTY`; the validated defaults remain `1.0` because the tested alternatives did not improve both WER and punctuation.
 
 *It listens on `http://0.0.0.0:5001`. You can also override `--device`, `--compute-type`, `--host`, and `--port`, or use `WHISPER_BACKEND`, `WHISPER_MODEL`, `WHISPER_DEVICE`, `WHISPER_COMPUTE_TYPE`, `WHISPER_HOST`, and `WHISPER_PORT`. Variant conversion can also be controlled with `WHISPER_VARIANT_CONVERSION`, `WHISPER_VARIANT_SOURCE`, and `WHISPER_VARIANT_TARGET`.*
 
