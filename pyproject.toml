@@ -8,6 +8,7 @@ dependencies = [
     "english-variant-converter",
     "fastapi>=0.137.1",
     "faster-whisper>=1.2.1",
+    "numpy>=2.0",
     "nvidia-cublas-cu12==12.8.4.1",
     "nvidia-cudnn-cu12==9.19.0.56",
     "python-multipart>=0.0.32",

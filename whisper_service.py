@@ -4,7 +4,6 @@ import ctypes
 import gc
 import json
 import logging
-from logging.config import dictConfig
 import os
 import re
 import shutil
@@ -15,11 +14,13 @@ import time
 import wave
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
+from logging.config import dictConfig
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from audio_preprocessing import prepare_audio_for_transcription
 
 service_logger = logging.getLogger("assistant.whisper")
 
@@ -493,6 +494,11 @@ class RuntimeConfig:
     log_prob_threshold: float
     no_speech_threshold: float
     compression_ratio_threshold: float
+    low_frequency_filter_enabled: bool
+    low_frequency_filter_cutoff_hz: float
+    low_frequency_filter_ratio_threshold: float
+    low_frequency_filter_absolute_dbfs: float
+    low_frequency_filter_dc_offset_threshold: float
     initial_prompt: str
     hotwords: str
     batch_threshold_seconds: float
@@ -1909,6 +1915,32 @@ def build_runtime_config(args: argparse.Namespace | None = None) -> RuntimeConfi
         (args.compression_ratio_threshold if args else None)
         or os.environ.get("WHISPER_COMPRESSION_RATIO_THRESHOLD", "2.4")
     )
+    low_frequency_filter_enabled = (
+        (args.low_frequency_filter if args else None)
+        if args is not None and args.low_frequency_filter is not None
+        else os.environ.get("WHISPER_LOW_FREQUENCY_FILTER", "true").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+    low_frequency_filter_cutoff_value = (
+        args.low_frequency_filter_cutoff_hz
+        if args is not None and args.low_frequency_filter_cutoff_hz is not None
+        else os.environ.get("WHISPER_LOW_FREQUENCY_FILTER_CUTOFF_HZ", "80")
+    )
+    low_frequency_filter_ratio_value = (
+        args.low_frequency_filter_ratio_threshold
+        if args is not None and args.low_frequency_filter_ratio_threshold is not None
+        else os.environ.get("WHISPER_LOW_FREQUENCY_FILTER_RATIO_THRESHOLD", "0.25")
+    )
+    low_frequency_filter_absolute_value = (
+        args.low_frequency_filter_absolute_dbfs
+        if args is not None and args.low_frequency_filter_absolute_dbfs is not None
+        else os.environ.get("WHISPER_LOW_FREQUENCY_FILTER_ABSOLUTE_DBFS", "-35")
+    )
+    low_frequency_filter_dc_value = (
+        args.low_frequency_filter_dc_offset_threshold
+        if args is not None and args.low_frequency_filter_dc_offset_threshold is not None
+        else os.environ.get("WHISPER_LOW_FREQUENCY_FILTER_DC_OFFSET_THRESHOLD", "0.005")
+    )
     initial_prompt = (args.initial_prompt if args else None) or os.environ.get("WHISPER_INITIAL_PROMPT", "")
     hotwords_value = (getattr(args, "hotwords", None) if args else None) or os.environ.get(
         "WHISPER_HOTWORDS", ""
@@ -1948,7 +1980,7 @@ def build_runtime_config(args: argparse.Namespace | None = None) -> RuntimeConfi
     recovery_request_limit_value = (
         args.recovery_request_limit
         if args is not None and args.recovery_request_limit is not None
-        else os.environ.get("WHISPER_RECOVERY_REQUEST_LIMIT", "5")
+        else os.environ.get("WHISPER_RECOVERY_REQUEST_LIMIT", "20")
     )
     failed_recovery_limit_value = (
         args.failed_recovery_limit
@@ -2000,6 +2032,13 @@ def build_runtime_config(args: argparse.Namespace | None = None) -> RuntimeConfi
         log_prob_threshold=float(log_prob_threshold_value),
         no_speech_threshold=float(no_speech_threshold_value),
         compression_ratio_threshold=float(compression_ratio_threshold_value),
+        low_frequency_filter_enabled=bool(low_frequency_filter_enabled),
+        low_frequency_filter_cutoff_hz=max(20.0, float(low_frequency_filter_cutoff_value)),
+        low_frequency_filter_ratio_threshold=min(
+            1.0, max(0.0, float(low_frequency_filter_ratio_value))
+        ),
+        low_frequency_filter_absolute_dbfs=float(low_frequency_filter_absolute_value),
+        low_frequency_filter_dc_offset_threshold=max(0.0, float(low_frequency_filter_dc_value)),
         initial_prompt=initial_prompt,
         hotwords=hotwords,
         batch_threshold_seconds=max(0.0, float(batch_threshold_seconds_value)),
@@ -2169,7 +2208,7 @@ def ensure_transcriber_loaded() -> None:
 
 
 def format_timing_fields(outcome: str, timings: dict[str, int]) -> str:
-    server_components = (
+    server_components = [
         "transcriber_ready_ms",
         "temp_file_open_ms",
         "temp_file_close_ms",
@@ -2177,11 +2216,13 @@ def format_timing_fields(outcome: str, timings: dict[str, int]) -> str:
         "server_transcribe_ms",
         "postprocess_ms",
         "temp_file_cleanup_ms",
-    )
+    ]
+    if "audio_preprocess_ms" in timings:
+        server_components.insert(4, "audio_preprocess_ms")
     server_breakdown = format_timing_breakdown(
         timings,
         "server_total_ms",
-        server_components,
+        tuple(server_components),
         "server_overhead_ms",
     )
     outcome_line = f"outcome={outcome}"
@@ -2260,6 +2301,7 @@ def client_timing_value(request: Request, header_name: str) -> int:
 async def transcribe_raw(request: Request):
     request_started = time.perf_counter()
     tmp_path: str | None = None
+    preprocessing_result = None
     transcription_event: str | None = None
     outcome = "failed"
     timings = {
@@ -2279,6 +2321,7 @@ async def transcribe_raw(request: Request):
         "upload_body_read_ms": -1,
         "temp_file_close_ms": -1,
         "latest_recovery_copy_ms": -1,
+        "audio_preprocess_ms": -1,
         "server_transcribe_ms": -1,
         "postprocess_ms": -1,
         "temp_file_cleanup_ms": -1,
@@ -2337,9 +2380,48 @@ async def transcribe_raw(request: Request):
             (time.perf_counter() - recovery_started) * 1000
         )
 
-        transcribe_started = time.perf_counter()
-        original_text = app.state.transcriber.transcribe_file(tmp_path)
-        timings["server_transcribe_ms"] = round((time.perf_counter() - transcribe_started) * 1000)
+        preprocessing_started = time.perf_counter()
+        with prepare_audio_for_transcription(
+            tmp_path,
+            enabled=app.state.runtime_config.low_frequency_filter_enabled,
+            cutoff_hz=app.state.runtime_config.low_frequency_filter_cutoff_hz,
+            ratio_threshold=app.state.runtime_config.low_frequency_filter_ratio_threshold,
+            absolute_dbfs_threshold=app.state.runtime_config.low_frequency_filter_absolute_dbfs,
+            dc_offset_threshold=app.state.runtime_config.low_frequency_filter_dc_offset_threshold,
+        ) as preprocessing_result:
+            timings["audio_preprocess_ms"] = round(
+                (time.perf_counter() - preprocessing_started) * 1000
+            )
+            analysis = (
+                preprocessing_result.analysis.as_dict()
+                if preprocessing_result.analysis
+                else {}
+            )
+            filtered_analysis = (
+                preprocessing_result.filtered_analysis.as_dict()
+                if preprocessing_result.filtered_analysis
+                else {}
+            )
+            print(
+                "Audio preprocessing: "
+                f"enabled={app.state.runtime_config.low_frequency_filter_enabled} "
+                f"filter_applied={preprocessing_result.filter_applied} "
+                f"reason={preprocessing_result.filter_reason} "
+                f"low_frequency_ratio={analysis.get('low_frequency_ratio', 'n/a')} "
+                f"low_frequency_dbfs={analysis.get('low_frequency_dbfs', 'n/a')} "
+                f"filtered_low_frequency_ratio={filtered_analysis.get('low_frequency_ratio', 'n/a')} "
+                f"dc_offset={analysis.get('dc_offset', 'n/a')} "
+                f"error={preprocessing_result.error or 'none'} "
+                f"audio_preprocess_ms={timings['audio_preprocess_ms']}"
+            )
+
+            transcribe_started = time.perf_counter()
+            original_text = app.state.transcriber.transcribe_file(
+                preprocessing_result.transcription_path
+            )
+            timings["server_transcribe_ms"] = round(
+                (time.perf_counter() - transcribe_started) * 1000
+            )
 
         postprocess_started = time.perf_counter()
         canonicalized_text = canonicalize_technical_text(original_text)
@@ -2371,6 +2453,7 @@ async def transcribe_raw(request: Request):
             "variant_conversion_enabled": app.state.runtime_config.variant_conversion_enabled,
             "variant_source": app.state.runtime_config.variant_source,
             "variant_target": app.state.runtime_config.variant_target,
+            "audio_preprocessing": preprocessing_result.as_dict(),
             "timings": timings,
         }
     except Exception as exc:
@@ -2387,6 +2470,9 @@ async def transcribe_raw(request: Request):
                 "error": f"{type(exc).__name__}: {exc}",
                 "backend": getattr(app.state.runtime_config, "backend", ""),
                 "model": getattr(app.state.runtime_config, "model_name", ""),
+                "audio_preprocessing": (
+                    preprocessing_result.as_dict() if preprocessing_result else None
+                ),
                 "timings": timings,
             },
         )
@@ -2602,6 +2688,52 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Compression ratio threshold to guard against degenerate transcripts.",
+    )
+    parser.add_argument(
+        "--low-frequency-filter",
+        dest="low_frequency_filter",
+        action="store_true",
+        default=None,
+        help=(
+            "Conditionally high-pass filter recordings with strong low-frequency "
+            "contamination before transcription. Enabled by default."
+        ),
+    )
+    parser.add_argument(
+        "--no-low-frequency-filter",
+        dest="low_frequency_filter",
+        action="store_false",
+        help="Disable conditional low-frequency audio filtering.",
+    )
+    parser.add_argument(
+        "--low-frequency-filter-cutoff-hz",
+        type=float,
+        default=None,
+        help="High-pass cutoff used by the conditional audio filter. Defaults to 80 Hz.",
+    )
+    parser.add_argument(
+        "--low-frequency-filter-ratio-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Minimum active-frame sub-60-Hz energy ratio that triggers filtering. "
+            "Defaults to 0.25."
+        ),
+    )
+    parser.add_argument(
+        "--low-frequency-filter-absolute-dbfs",
+        type=float,
+        default=None,
+        help=(
+            "Minimum active-frame low-frequency level that triggers filtering. "
+            "Defaults to -35 dBFS."
+        ),
+    )
+    parser.add_argument(
+        "--low-frequency-filter-dc-offset-threshold",
+        type=float,
+        default=None,
+        help="Absolute DC offset threshold that contributes to filtering. Defaults to 0.005.",
     )
     parser.add_argument(
         "--initial-prompt",

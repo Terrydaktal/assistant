@@ -82,6 +82,35 @@ class FasterWhisperBatchingTests(unittest.TestCase):
 
         self.assertEqual(config.long_audio_batch_size, 2)
 
+    def test_low_frequency_filter_defaults_are_enabled_and_configurable(self):
+        with patch.dict(os.environ, {}, clear=True):
+            config = build_runtime_config()
+
+        self.assertTrue(config.low_frequency_filter_enabled)
+        self.assertEqual(config.low_frequency_filter_cutoff_hz, 80.0)
+        self.assertEqual(config.low_frequency_filter_ratio_threshold, 0.25)
+        self.assertEqual(config.low_frequency_filter_absolute_dbfs, -35.0)
+        self.assertEqual(config.low_frequency_filter_dc_offset_threshold, 0.005)
+
+        with patch.dict(
+            os.environ,
+            {
+                "WHISPER_LOW_FREQUENCY_FILTER": "false",
+                "WHISPER_LOW_FREQUENCY_FILTER_CUTOFF_HZ": "100",
+                "WHISPER_LOW_FREQUENCY_FILTER_RATIO_THRESHOLD": "0.4",
+                "WHISPER_LOW_FREQUENCY_FILTER_ABSOLUTE_DBFS": "-30",
+                "WHISPER_LOW_FREQUENCY_FILTER_DC_OFFSET_THRESHOLD": "0.01",
+            },
+            clear=True,
+        ):
+            configured = build_runtime_config()
+
+        self.assertFalse(configured.low_frequency_filter_enabled)
+        self.assertEqual(configured.low_frequency_filter_cutoff_hz, 100.0)
+        self.assertEqual(configured.low_frequency_filter_ratio_threshold, 0.4)
+        self.assertEqual(configured.low_frequency_filter_absolute_dbfs, -30.0)
+        self.assertEqual(configured.low_frequency_filter_dc_offset_threshold, 0.01)
+
     def test_long_audio_uses_batched_gpu(self):
         transcriber = self.make_transcriber()
         transcriber._transcribe_batched = Mock(return_value="batched")
@@ -682,6 +711,28 @@ class TimingFormatTests(unittest.TestCase):
 
         self.assertTrue(fields.startswith("outcome=failed failed_recovery_copy_ms=4 "))
 
+    def test_audio_preprocessing_is_in_server_timing_order(self):
+        timings = {
+            "transcriber_ready_ms": 0,
+            "temp_file_open_ms": 0,
+            "temp_file_close_ms": 0,
+            "latest_recovery_copy_ms": 1,
+            "audio_preprocess_ms": 12,
+            "server_transcribe_ms": 692,
+            "postprocess_ms": 0,
+            "temp_file_cleanup_ms": 0,
+            "server_total_ms": 705,
+            "failed_recovery_copy_ms": -1,
+        }
+
+        self.assertEqual(
+            format_timing_fields("success", timings),
+            "outcome=success server_total_ms=705 (transcriber_ready_ms=0 + "
+            "temp_file_open_ms=0 + temp_file_close_ms=0 + latest_recovery_copy_ms=1 + "
+            "audio_preprocess_ms=12 + server_transcribe_ms=692 + postprocess_ms=0 + "
+            "temp_file_cleanup_ms=0)",
+        )
+
 
 class RecoveryRetentionTests(unittest.TestCase):
     def setUp(self):
@@ -703,7 +754,7 @@ class RecoveryRetentionTests(unittest.TestCase):
         ):
             overridden = build_runtime_config()
 
-        self.assertEqual(defaults.recovery_request_limit, 5)
+        self.assertEqual(defaults.recovery_request_limit, 20)
         self.assertEqual(defaults.failed_recovery_limit, 20)
         self.assertEqual(overridden.recovery_request_limit, 3)
         self.assertEqual(overridden.failed_recovery_limit, 7)

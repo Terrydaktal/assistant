@@ -17,6 +17,7 @@ Desktop dictation is included locally and shares the persistent Whisper service 
 ├── pyproject.toml        # Python virtual environment configuration (uv)
 ├── uv.lock               # Python lockfile
 ├── whisper_service.py    # Configurable transcription server (FastAPI)
+├── audio_preprocessing.py # Conditional low-frequency contamination detector/filter
 ├── consensus_worker.py   # Isolated Whisper/Parakeet consensus voter
 ├── transcription_consensus.py # Deterministic ROVER word/punctuation voting
 ├── consensus_cohere/     # Isolated Transformers 5 Cohere worker project
@@ -41,7 +42,9 @@ Loads a selectable transcription backend into memory.
 - **Output:** JSON containing `{"text": "...", "backend": "...", "model": "..."}` plus variant-conversion metadata when enabled.
 - **Backends:** `faster-whisper` by default, `nvidia/canary-qwen-2.5b` with the Canary backend, `nvidia/parakeet-tdt-0.6b-v2` with the Parakeet backend, IBM's `granite-speech-4.1-2b-GGUF:Q8_0` with the Granite Speech backend, or the sequential `consensus` and disagreement-only `adaptive-consensus` modes using Whisper, Cohere, and Parakeet.
 - **Optional post-processing:** deterministic English variant conversion (for example `en_US -> en_GB`) using the Trelis English Variant Converter library.
-- **Diagnostic retention:** keeps the five most recent request recordings as `latest_request.wav` plus four numbered history slots and keeps up to 20 timestamped failed request/error pairs in `.transcription_recovery`. Set `--recovery-request-limit` or `WHISPER_RECOVERY_REQUEST_LIMIT`, and `--failed-recovery-limit` or `WHISPER_FAILED_RECOVERY_LIMIT`, to change the limits; `0` disables that category.
+- **Conditional source cleanup:** before transcription, `audio_preprocessing.py` measures active-frame sub-60 Hz energy and DC offset. If low-frequency energy is sufficiently strong and either its ratio or the DC-offset trigger is exceeded, it creates a temporary 80 Hz high-pass WAV for the model; otherwise the original upload is used unchanged. The original upload is always retained for recovery, filtering fails open, and the response includes the analysis and filter decision.
+- The conditional filter uses the system `ffmpeg` executable when triggered; if it is unavailable or fails, the original audio is sent to the model and the failure is reported in the server log and response.
+- **Diagnostic retention:** keeps the 20 most recent request recordings as `latest_request.wav` plus 19 numbered history slots and keeps up to 20 timestamped failed request/error pairs in `.transcription_recovery`. Set `--recovery-request-limit` or `WHISPER_RECOVERY_REQUEST_LIMIT`, and `--failed-recovery-limit` or `WHISPER_FAILED_RECOVERY_LIMIT`, to change the limits; `0` disables that category.
 
 ### 2. `voice_bridge.js` (Web Server & Puppeteer Automator)
 Connects to your active Chromium browser (remote-debugging on port `9233`) and acts as the broker between the phone and Google AI Mode.
@@ -159,6 +162,8 @@ uv run python whisper_service.py \
 For long recordings, audio at least 60 seconds long uses the loaded GPU model through faster-whisper's batched pipeline with accuracy-validated batch size 2. Batch size 4 is an optional speed mode: on the RTX 5060 it peaked at 4,924 MiB and reduced aggregate processing time by about 24% across four recordings, but made three additional errors across 41,500 reference words. Enable it with `--long-audio-batch-size 4` or `WHISPER_LONG_AUDIO_BATCH_SIZE=4`; the same explicit override controls the Whisper voter in consensus modes. If a batched attempt fails, the service retries the same file with ordinary GPU transcription before using the cached CPU fallback for a CUDA memory failure. Configure the threshold with `--batch-threshold-seconds` or `WHISPER_BATCH_THRESHOLD_SECONDS`; batch size 1 disables batching.
 
 Known names and jargon can be supplied to faster-whisper with `--hotwords`, `--hotwords-file`, `WHISPER_HOTWORDS`, or `WHISPER_HOTWORDS_FILE`. Hotwords are disabled by default and should remain narrowly scoped: on the retained technical excerpt, both an 11-term list and a focused three-term list increased WER. Beam-search `--patience` and `--length-penalty` are also configurable through `WHISPER_PATIENCE` and `WHISPER_LENGTH_PENALTY`; the validated defaults remain `1.0` because the tested alternatives did not improve both WER and punctuation.
+
+The low-frequency source-quality detector is enabled by default. It adds `audio_preprocess_ms` to the server timing breakdown and logs `filter_applied`, the trigger reason, low-frequency ratio, low-frequency level, and DC offset for every request. Override it with `--no-low-frequency-filter` or `WHISPER_LOW_FREQUENCY_FILTER=false`. The defaults can be tuned with `--low-frequency-filter-cutoff-hz` / `WHISPER_LOW_FREQUENCY_FILTER_CUTOFF_HZ`, `--low-frequency-filter-ratio-threshold` / `WHISPER_LOW_FREQUENCY_FILTER_RATIO_THRESHOLD`, `--low-frequency-filter-absolute-dbfs` / `WHISPER_LOW_FREQUENCY_FILTER_ABSOLUTE_DBFS`, and `--low-frequency-filter-dc-offset-threshold` / `WHISPER_LOW_FREQUENCY_FILTER_DC_OFFSET_THRESHOLD`.
 
 *It listens on `http://0.0.0.0:5001`. You can also override `--device`, `--compute-type`, `--host`, and `--port`, or use `WHISPER_BACKEND`, `WHISPER_MODEL`, `WHISPER_DEVICE`, `WHISPER_COMPUTE_TYPE`, `WHISPER_HOST`, and `WHISPER_PORT`. Variant conversion can also be controlled with `WHISPER_VARIANT_CONVERSION`, `WHISPER_VARIANT_SOURCE`, and `WHISPER_VARIANT_TARGET`.*
 
