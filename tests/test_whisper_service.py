@@ -82,6 +82,32 @@ class FasterWhisperBatchingTests(unittest.TestCase):
 
         self.assertEqual(config.long_audio_batch_size, 2)
 
+    def test_whisper_production_defaults_match_validated_run(self):
+        with patch.dict(os.environ, {}, clear=True):
+            config = build_runtime_config()
+
+        self.assertEqual(config.backend, "faster-whisper")
+        self.assertEqual(config.model_name, "large-v3")
+        self.assertEqual(config.device, "cuda")
+        self.assertEqual(config.compute_type, "float16")
+        self.assertEqual(config.beam_size, 4)
+        self.assertEqual(config.patience, 1.0)
+        self.assertEqual(config.length_penalty, 1.0)
+        self.assertTrue(config.vad_filter)
+        self.assertEqual(config.vad_threshold, 0.30)
+        self.assertEqual(config.vad_min_silence_ms, 1000)
+        self.assertEqual(config.vad_speech_pad_ms, 400)
+        self.assertEqual(config.log_prob_threshold, -1.0)
+        self.assertEqual(config.no_speech_threshold, 0.3)
+        self.assertEqual(config.compression_ratio_threshold, 2.4)
+        self.assertEqual(config.batch_threshold_seconds, 60.0)
+        self.assertEqual(config.long_audio_batch_size, 2)
+        self.assertTrue(config.cpu_fallback_enabled)
+        self.assertEqual(config.cpu_fallback_compute_type, "int8")
+        self.assertTrue(config.variant_conversion_enabled)
+        self.assertEqual(config.variant_source, "en_US")
+        self.assertEqual(config.variant_target, "en_GB")
+
     def test_low_frequency_filter_defaults_are_enabled_and_configurable(self):
         with patch.dict(os.environ, {}, clear=True):
             config = build_runtime_config()

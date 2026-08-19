@@ -341,8 +341,12 @@ object ImportedAudioTailSender {
     private fun guessFileExtension(context: Context, uri: Uri): String {
         val displayName = queryDisplayName(context, uri)?.lowercase().orEmpty()
         return when {
-            displayName.endsWith(".m4a") -> ".m4a"
-            displayName.endsWith(".mp3") -> ".mp3"
+            displayName.endsWith(".m4a") || displayName.contains(".m4a.") -> ".m4a"
+            displayName.endsWith(".mp3") || displayName.contains(".mp3.") -> ".mp3"
+            displayName.endsWith(".opus") || displayName.contains(".opus.") -> ".opus"
+            displayName.endsWith(".ogg") || displayName.contains(".ogg.") -> ".ogg"
+            displayName.endsWith(".webm") || displayName.contains(".webm.") -> ".webm"
+            displayName.endsWith(".wav") || displayName.contains(".wav.") -> ".wav"
             context.contentResolver.getType(uri)?.contains("mp4", ignoreCase = true) == true -> ".m4a"
             else -> ".mp3"
         }

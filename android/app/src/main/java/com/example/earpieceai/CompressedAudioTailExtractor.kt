@@ -6,10 +6,33 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.net.Uri
+import android.os.Build
+import androidx.annotation.RequiresApi
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.nio.ByteBuffer
+
+internal enum class CompressedTailTransport(
+    val extension: String,
+    val displayName: String
+) {
+    M4A("m4a", "m4a"),
+    MP3("mp3", "mp3"),
+    OGG_OPUS("ogg", "ogg-opus")
+}
+
+internal fun compressedTailTransportForMime(
+    mime: String,
+    supportsOggMuxer: Boolean
+): CompressedTailTransport? {
+    return when (mime.lowercase()) {
+        "audio/mp4a-latm", "audio/aac" -> CompressedTailTransport.M4A
+        "audio/mpeg" -> CompressedTailTransport.MP3
+        "audio/opus" -> CompressedTailTransport.OGG_OPUS.takeIf { supportsOggMuxer }
+        else -> null
+    }
+}
 
 object CompressedAudioTailExtractor {
     data class Result(
@@ -57,11 +80,10 @@ object CompressedAudioTailExtractor {
         val trackFormat = extractor.getTrackFormat(trackIndex)
         val mime = trackFormat.getString(MediaFormat.KEY_MIME)
             ?: throw IOException("Audio track MIME type missing")
-        val transport = when (mime.lowercase()) {
-            "audio/mp4a-latm", "audio/aac" -> "m4a"
-            "audio/mpeg" -> "mp3"
-            else -> throw IOException("Compressed tail copy is unsupported for $mime")
-        }
+        val transport = compressedTailTransportForMime(
+            mime = mime,
+            supportsOggMuxer = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+        ) ?: throw IOException("Compressed tail copy is unsupported for $mime")
         val durationUs = trackFormat.longOrZero(MediaFormat.KEY_DURATION)
         if (durationUs <= 0L) {
             throw IOException("Audio duration is unavailable for compressed tail extraction")
@@ -73,18 +95,30 @@ object CompressedAudioTailExtractor {
 
         val capacity = trackFormat.intOrZero(MediaFormat.KEY_MAX_INPUT_SIZE).coerceAtLeast(1024 * 1024)
         val buffer = ByteBuffer.allocateDirect(capacity)
-        val output = File.createTempFile("imported_tail_", ".$transport", cacheDir)
+        val output = File.createTempFile("imported_tail_", ".${transport.extension}", cacheDir)
         return try {
             val firstSampleUs = extractor.sampleTime.coerceAtLeast(targetStartUs)
             when (transport) {
-                "m4a" -> writeM4a(output, extractor, trackFormat, buffer, firstSampleUs)
-                "mp3" -> writeMp3(output, extractor, buffer)
-                else -> throw IOException("Unsupported compressed output format: $transport")
+                CompressedTailTransport.M4A -> writeMuxedAudio(
+                    output,
+                    extractor,
+                    trackFormat,
+                    buffer,
+                    firstSampleUs,
+                    MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
+                )
+                CompressedTailTransport.MP3 -> writeMp3(output, extractor, buffer)
+                CompressedTailTransport.OGG_OPUS -> {
+                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                        throw IOException("Ogg Opus muxing requires Android 10 or newer")
+                    }
+                    writeOggOpus(output, extractor, trackFormat, buffer, firstSampleUs)
+                }
             }
             if (output.length() <= 0L) throw IOException("No compressed audio found in requested tail")
             Result(
                 file = output,
-                format = transport,
+                format = transport.displayName,
                 durationUs = (durationUs - firstSampleUs).coerceAtLeast(0L),
                 sourceBytes = sourceBytes,
                 openMs = openMs,
@@ -102,14 +136,15 @@ object CompressedAudioTailExtractor {
         }
     }
 
-    private fun writeM4a(
+    private fun writeMuxedAudio(
         output: File,
         extractor: MediaExtractor,
         trackFormat: MediaFormat,
         buffer: ByteBuffer,
-        firstSampleUs: Long
+        firstSampleUs: Long,
+        outputFormat: Int
     ) {
-        val muxer = MediaMuxer(output.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+        val muxer = MediaMuxer(output.absolutePath, outputFormat)
         var started = false
         try {
             val outputTrack = muxer.addTrack(trackFormat)
@@ -139,6 +174,24 @@ object CompressedAudioTailExtractor {
             if (started) muxer.stop()
             muxer.release()
         }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private fun writeOggOpus(
+        output: File,
+        extractor: MediaExtractor,
+        trackFormat: MediaFormat,
+        buffer: ByteBuffer,
+        firstSampleUs: Long
+    ) {
+        writeMuxedAudio(
+            output,
+            extractor,
+            trackFormat,
+            buffer,
+            firstSampleUs,
+            MediaMuxer.OutputFormat.MUXER_OUTPUT_OGG
+        )
     }
 
     private fun writeMp3(output: File, extractor: MediaExtractor, buffer: ByteBuffer) {

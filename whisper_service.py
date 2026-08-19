@@ -1990,7 +1990,7 @@ def build_runtime_config(args: argparse.Namespace | None = None) -> RuntimeConfi
     variant_conversion_enabled = (
         (args.variant_conversion if args else None)
         if args is not None and args.variant_conversion is not None
-        else os.environ.get("WHISPER_VARIANT_CONVERSION", "false").strip().lower() in {"1", "true", "yes", "on"}
+        else os.environ.get("WHISPER_VARIANT_CONVERSION", "true").strip().lower() in {"1", "true", "yes", "on"}
     )
     variant_source = (args.variant_source if args else None) or os.environ.get("WHISPER_VARIANT_SOURCE", "en_US")
     variant_target = (args.variant_target if args else None) or os.environ.get("WHISPER_VARIANT_TARGET", "en_GB")
@@ -2801,7 +2801,7 @@ def parse_args() -> argparse.Namespace:
         "--recovery-request-limit",
         type=int,
         default=None,
-        help="Number of recent request recordings to retain. Defaults to 5; 0 disables it.",
+        help="Number of recent request recordings to retain. Defaults to 20; 0 disables it.",
     )
     parser.add_argument(
         "--failed-recovery-limit",

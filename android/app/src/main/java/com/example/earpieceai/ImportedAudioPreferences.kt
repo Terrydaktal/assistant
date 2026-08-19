@@ -6,6 +6,7 @@ object ImportedAudioPreferences {
     private const val PREFS_NAME = "imported_audio_settings"
     private const val KEY_URI = "selected_uri"
     private const val KEY_DISPLAY_NAME = "selected_display_name"
+    private const val KEY_RECORDERS_TREE_URI = "recorders_tree_uri"
     private const val KEY_TAIL_SECONDS = "tail_seconds"
     private const val DEFAULT_TAIL_SECONDS = 30
 
@@ -32,6 +33,26 @@ object ImportedAudioPreferences {
             .edit()
             .putString(KEY_URI, uri)
             .putString(KEY_DISPLAY_NAME, displayName)
+            .apply()
+    }
+
+    fun getRecordersTreeUri(context: Context): String? {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_RECORDERS_TREE_URI, null)
+            ?.takeIf { it.isNotBlank() }
+    }
+
+    fun saveRecordersTreeUri(context: Context, uri: String) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_RECORDERS_TREE_URI, uri)
+            .apply()
+    }
+
+    fun clearRecordersTreeUri(context: Context) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .remove(KEY_RECORDERS_TREE_URI)
             .apply()
     }
 

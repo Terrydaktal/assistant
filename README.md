@@ -41,7 +41,7 @@ Loads a selectable transcription backend into memory.
 - **Input:** POST request with binary audio payload at `/transcribe_raw`.
 - **Output:** JSON containing `{"text": "...", "backend": "...", "model": "..."}` plus variant-conversion metadata when enabled.
 - **Backends:** `faster-whisper` by default, `nvidia/canary-qwen-2.5b` with the Canary backend, `nvidia/parakeet-tdt-0.6b-v2` with the Parakeet backend, IBM's `granite-speech-4.1-2b-GGUF:Q8_0` with the Granite Speech backend, or the sequential `consensus` and disagreement-only `adaptive-consensus` modes using Whisper, Cohere, and Parakeet.
-- **Optional post-processing:** deterministic English variant conversion (for example `en_US -> en_GB`) using the Trelis English Variant Converter library.
+- **Production post-processing:** deterministic English variant conversion defaults to `en_US -> en_GB` using the Trelis English Variant Converter library. Disable it with `--no-variant-conversion` or `WHISPER_VARIANT_CONVERSION=false`.
 - **Conditional source cleanup:** before transcription, `audio_preprocessing.py` measures active-frame sub-60 Hz energy and DC offset. If low-frequency energy is sufficiently strong and either its ratio or the DC-offset trigger is exceeded, it creates a temporary 80 Hz high-pass WAV for the model; otherwise the original upload is used unchanged. The original upload is always retained for recovery, filtering fails open, and the response includes the analysis and filter decision.
 - The conditional filter uses the system `ffmpeg` executable when triggered; if it is unavailable or fails, the original audio is sent to the model and the failure is reported in the server log and response.
 - **Diagnostic retention:** keeps the 20 most recent request recordings as `latest_request.wav` plus 19 numbered history slots and keeps up to 20 timestamped failed request/error pairs in `.transcription_recovery`. Set `--recovery-request-limit` or `WHISPER_RECOVERY_REQUEST_LIMIT`, and `--failed-recovery-limit` or `WHISPER_FAILED_RECOVERY_LIMIT`, to change the limits; `0` disables that category.
@@ -61,11 +61,11 @@ Connects to your active Chromium browser (remote-debugging on port `9233`) and a
 A Kotlin-based Android app compiled and installed on your phone.
 - **Recording:** Captures 16 kHz mono audio and writes WAV for private/local server addresses or fast level-0 FLAC for remote addresses.
 - **Voice Bridge Request:** POSTs the selected audio payload to `http://<your-pc-ip>:9090/voice-command`.
-- **Imported audio tails:** Copies compressed M4A/AAC packets or MP3 frames without decoding when possible, then falls back to PCM decode and level-0 FLAC when direct extraction is unsupported.
+- **Imported audio tails:** Copies compressed M4A/AAC or MP3 packets without decoding and remuxes Opus packets into Ogg Opus on Android 10 or newer, then falls back to PCM decode and level-0 FLAC when direct extraction is unsupported.
 - **TTS rendering:** Leverages on-device Android `TextToSpeech` to speak responses back into the earpiece.
 
 ### 4. `desktop_dictation/` (Desktop Dictation Client)
-`toggle.sh` starts or stops a uniquely named microphone recording. Completed recordings are processed in order by `queue-worker.sh`, sent to `whisper_service.py`, and inserted by `transcribe-and-type.py` through the modifier-safe `wayland-type-helper.sh`. Failed server requests remain queued under `$XDG_STATE_HOME/assistant-desktop-dictation/queue` for the next invocation, including across restarts. Delivery completion and modifier refusals are reported to `/desktop-delivery-report`; refused text is not retried as delayed keyboard input.
+`toggle.sh` starts or stops a uniquely named microphone recording. Completed recordings are processed in order by `queue-worker.sh`, sent to `whisper_service.py`, and inserted by `transcribe-and-type.py` through the modifier-safe `wayland-type-helper.sh`. If Whisper is unavailable, the worker preserves the recording and retries with exponential backoff until the server returns; queued recordings therefore drain automatically when Whisper starts. Failed recordings remain under `$XDG_STATE_HOME/assistant-desktop-dictation/queue` across restarts. Delivery completion and modifier refusals are reported to `/desktop-delivery-report`; refused text is not retried as delayed keyboard input.
 
 ---
 
@@ -150,7 +150,7 @@ uv run python whisper_service.py \
   --variant-target en_GB
 ```
 Use `--preset accuracy-beam-experimental` with the same command to compare the beam-5 decoder against the primary greedy accuracy path.
-To force British spellings from a US-biased Whisper transcript:
+To explicitly force British spellings from a US-biased Whisper transcript (this is already the default):
 ```bash
 cd ~/Dev/assistant
 uv run python whisper_service.py \
@@ -182,7 +182,7 @@ Bind the numeric keypad `+` shortcut to:
 ```bash
 /home/lewis/Dev/assistant/desktop_dictation/toggle.sh
 ```
-The first press starts recording and the second press stops it, queues it, transcribes it through port `5001`, and types it only when no modifier key is held. Logs are written to `$XDG_STATE_HOME/assistant-desktop-dictation/dictation.log`.
+The first press starts recording and the second press stops it, queues it, transcribes it through port `5001`, and types it only when no modifier key is held. The queue worker retries unavailable-server failures automatically; set `ASSISTANT_QUEUE_RETRY_INITIAL_S` and `ASSISTANT_QUEUE_RETRY_MAX_S` to tune its backoff. Logs are written to `$XDG_STATE_HOME/assistant-desktop-dictation/dictation.log`.
 PipeWire is used normally. If its recorder process does not produce audio shortly after startup, the client retries the same recording through direct ALSA using `plughw`; it prefers a device named `Yeti Stereo Microphone` and otherwise chooses the first capture device. Set `ASSISTANT_ALSA_DEVICE=plughw:<card>,<device>` to override detection, or set `ASSISTANT_PIPEWIRE_HEALTH_DELAY_S` to adjust the startup check delay.
 The included `net.local.trigger.sh.desktop` launcher preserves the existing KDE shortcut service ID when installed under `~/.local/share/applications`.
 

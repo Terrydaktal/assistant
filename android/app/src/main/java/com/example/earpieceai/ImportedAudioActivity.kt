@@ -10,7 +10,9 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
+import android.provider.DocumentsContract
 import android.provider.MediaStore
+import android.provider.OpenableColumns
 import android.util.Log
 import android.widget.Button
 import android.widget.EditText
@@ -44,6 +46,18 @@ class ImportedAudioActivity : AppCompatActivity() {
     private var selectedAudioUri: Uri? = null
     private var sendStartedAt = 0L
 
+    private data class RecordingCandidate(
+        val uri: Uri,
+        val displayName: String,
+        val modifiedMs: Long,
+        val sizeBytes: Long
+    )
+
+    private data class DocumentFolder(
+        val documentId: String,
+        val depth: Int
+    )
+
     private val selectAudioLauncher =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri == null) return@registerForActivityResult
@@ -58,17 +72,16 @@ class ImportedAudioActivity : AppCompatActivity() {
             updateSelectedAudioSummary()
         }
 
-    private val requestAudioLibraryPermissionLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (granted) {
-                chooseLatestRecording()
-            } else {
-                Toast.makeText(
-                    this,
-                    "Audio permission is required to find the latest recording",
-                    Toast.LENGTH_LONG
-                ).show()
+    private val selectRecordersFolderLauncher =
+        registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            if (uri == null) return@registerForActivityResult
+            try {
+                contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            } catch (error: SecurityException) {
+                Log.w(TAG, "Could not persist read permission for Recorders folder", error)
             }
+            ImportedAudioPreferences.saveRecordersTreeUri(this, uri.toString())
+            chooseLatestRecording()
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -109,67 +122,139 @@ class ImportedAudioActivity : AppCompatActivity() {
     }
 
     private fun selectAudioFile() {
-        selectAudioLauncher.launch(arrayOf("audio/mpeg", "audio/mp4", "audio/*"))
+        selectAudioLauncher.launch(arrayOf("audio/*"))
     }
 
     private fun chooseLatestRecordingWithPermission() {
-        val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            Manifest.permission.READ_MEDIA_AUDIO
-        } else {
-            Manifest.permission.READ_EXTERNAL_STORAGE
+        if (ImportedAudioPreferences.getRecordersTreeUri(this) == null) {
+            Toast.makeText(
+                this,
+                "Select the Recorders folder once so Assistant can see the file while it is recording",
+                Toast.LENGTH_LONG
+            ).show()
+            selectRecordersFolderLauncher.launch(null)
+            return
         }
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
-            ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
-        ) {
-            chooseLatestRecording()
-        } else {
-            requestAudioLibraryPermissionLauncher.launch(permission)
-        }
+        chooseLatestRecording()
     }
 
     private fun chooseLatestRecording() {
         activityScope.launch(Dispatchers.IO) {
-            val result = runCatching { findLatestRecordingInRecordersFolder() }
+            val treeUri = ImportedAudioPreferences.getRecordersTreeUri(this@ImportedAudioActivity)
+                ?.let(Uri::parse)
+            val treeResult = runCatching {
+                treeUri?.let(::findLatestRecordingInDocumentTree)
+            }
+            val mediaStoreResult = if (hasAudioLibraryPermission()) {
+                runCatching { findLatestRecordingInMediaStore() }.getOrNull()
+            } else {
+                null
+            }
             withContext(Dispatchers.Main) {
-                val latest = result.getOrElse { error ->
-                    Log.e(TAG, "Failed to find latest recording", error)
+                val treeError = treeResult.exceptionOrNull()
+                if (treeError != null) {
+                    Log.e(TAG, "Failed to read the selected Recorders folder", treeError)
+                    ImportedAudioPreferences.clearRecordersTreeUri(this@ImportedAudioActivity)
                     Toast.makeText(
                         this@ImportedAudioActivity,
-                        "Could not search the Recorders folder: ${error.message ?: "Unknown error"}",
+                        "Recorders folder access expired. Tap again and select the folder.",
                         Toast.LENGTH_LONG
                     ).show()
                     return@withContext
                 }
+                val latest = listOfNotNull(treeResult.getOrNull(), mediaStoreResult)
+                    .maxWithOrNull(compareBy<RecordingCandidate> { it.modifiedMs }.thenBy { it.sizeBytes })
                 if (latest == null) {
                     Toast.makeText(
                         this@ImportedAudioActivity,
-                        "No MP3 or M4A recording found in the Recorders folder",
+                        "No supported audio recording found in the selected Recorders folder",
                         Toast.LENGTH_LONG
                     ).show()
                     return@withContext
                 }
-                selectedAudioUri = latest.first
+                selectedAudioUri = latest.uri
                 ImportedAudioPreferences.saveSelectedAudio(
                     this@ImportedAudioActivity,
-                    latest.first.toString(),
-                    latest.second
+                    latest.uri.toString(),
+                    latest.displayName
                 )
                 updateSelectedAudioSummary()
                 Toast.makeText(
                     this@ImportedAudioActivity,
-                    "Selected latest recording: ${latest.second}",
+                    "Selected latest recording: ${latest.displayName}",
                     Toast.LENGTH_SHORT
                 ).show()
             }
         }
     }
 
-    private fun findLatestRecordingInRecordersFolder(): Pair<Uri, String>? {
+    private fun hasAudioLibraryPermission(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
+        val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.READ_MEDIA_AUDIO
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+        return ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun findLatestRecordingInDocumentTree(treeUri: Uri): RecordingCandidate? {
+        val folders = ArrayDeque<DocumentFolder>()
+        folders.add(DocumentFolder(DocumentsContract.getTreeDocumentId(treeUri), 0))
+        var latest: RecordingCandidate? = null
+
+        while (folders.isNotEmpty()) {
+            val folder = folders.removeFirst()
+            val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, folder.documentId)
+            val projection = arrayOf(
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                DocumentsContract.Document.COLUMN_MIME_TYPE,
+                DocumentsContract.Document.COLUMN_LAST_MODIFIED,
+                DocumentsContract.Document.COLUMN_SIZE
+            )
+            contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
+                val idIndex = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                val nameIndex = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                val mimeIndex = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                val modifiedIndex = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+                val sizeIndex = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_SIZE)
+                while (cursor.moveToNext()) {
+                    val documentId = cursor.getString(idIndex)
+                    val displayName = cursor.getString(nameIndex).orEmpty()
+                    val mimeType = cursor.getString(mimeIndex).orEmpty()
+                    if (mimeType == DocumentsContract.Document.MIME_TYPE_DIR) {
+                        if (folder.depth < 3) {
+                            folders.add(DocumentFolder(documentId, folder.depth + 1))
+                        }
+                        continue
+                    }
+                    if (!isSupportedRecording(displayName, mimeType)) continue
+
+                    val candidate = RecordingCandidate(
+                        uri = DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId),
+                        displayName = displayName,
+                        modifiedMs = if (cursor.isNull(modifiedIndex)) 0L else cursor.getLong(modifiedIndex),
+                        sizeBytes = if (cursor.isNull(sizeIndex)) 0L else cursor.getLong(sizeIndex)
+                    )
+                    if (latest == null || candidate.modifiedMs > latest.modifiedMs ||
+                        candidate.modifiedMs == latest.modifiedMs && candidate.sizeBytes > latest.sizeBytes
+                    ) {
+                        latest = candidate
+                    }
+                }
+            }
+        }
+        return latest
+    }
+
+    private fun findLatestRecordingInMediaStore(): RecordingCandidate? {
         val collection = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
         val projection = buildList {
             add(MediaStore.Audio.Media._ID)
             add(MediaStore.Audio.Media.DISPLAY_NAME)
             add(MediaStore.Audio.Media.DATE_MODIFIED)
+            add(MediaStore.Audio.Media.SIZE)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 add(MediaStore.Audio.Media.RELATIVE_PATH)
             } else {
@@ -188,24 +273,38 @@ class ImportedAudioActivity : AppCompatActivity() {
         contentResolver.query(collection, projection, selection, selectionArgs, sortOrder)?.use { cursor ->
             val idIndex = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
             val nameIndex = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME)
+            val modifiedIndex = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_MODIFIED)
+            val sizeIndex = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.SIZE)
             while (cursor.moveToNext()) {
                 val displayName = cursor.getString(nameIndex).orEmpty()
-                if (!displayName.endsWith(".mp3", ignoreCase = true) &&
-                    !displayName.endsWith(".m4a", ignoreCase = true)
-                ) {
-                    continue
-                }
-                return ContentUris.withAppendedId(collection, cursor.getLong(idIndex)) to displayName
+                if (!isSupportedRecording(displayName, "audio/*")) continue
+                return RecordingCandidate(
+                    uri = ContentUris.withAppendedId(collection, cursor.getLong(idIndex)),
+                    displayName = displayName,
+                    modifiedMs = cursor.getLong(modifiedIndex) * 1_000L,
+                    sizeBytes = cursor.getLong(sizeIndex)
+                )
             }
         }
         return null
     }
 
+    private fun isSupportedRecording(displayName: String, mimeType: String): Boolean {
+        val lowerName = displayName.lowercase(Locale.US)
+        return mimeType.startsWith("audio/", ignoreCase = true) ||
+            lowerName.endsWith(".mp3") || lowerName.endsWith(".m4a") ||
+            lowerName.endsWith(".opus") || lowerName.endsWith(".ogg") ||
+            lowerName.endsWith(".webm") || lowerName.endsWith(".wav") ||
+            lowerName.contains(".mp3.") || lowerName.contains(".m4a.") ||
+            lowerName.contains(".opus.") || lowerName.contains(".ogg.") ||
+            lowerName.contains(".webm.") || lowerName.contains(".wav.")
+    }
+
     private fun resolveAudioDisplayName(uri: Uri): String {
-        return contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+        return contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
             ?.use { cursor ->
                 if (!cursor.moveToFirst()) return@use null
-                val columnIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                val columnIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                 if (columnIndex < 0) null else cursor.getString(columnIndex)
             }
             ?: (uri.lastPathSegment ?: "Selected audio")
@@ -214,7 +313,7 @@ class ImportedAudioActivity : AppCompatActivity() {
     private fun sendAudioTail() {
         val uri = selectedAudioUri
         if (uri == null) {
-            Toast.makeText(this, "Choose an MP3 or M4A recording first", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Choose an audio recording first", Toast.LENGTH_LONG).show()
             return
         }
         val tailSeconds = tailSecondsInput.text.toString().trim().toIntOrNull()
